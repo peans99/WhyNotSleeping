@@ -1,0 +1,139 @@
+name: Release
+
+# Cut a release by pushing a tag: git tag -a v1.0.0 -m "..." && git push origin v1.0.0
+#
+# What ships is two single self-contained executables: WhyNotSleeping.exe, the
+# window, for anyone; and WhyNotSleepingCli.exe, the console monitor. Neither
+# needs .NET installed, and there is nothing to unpack.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. v1.0.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Version from tag
+        id: version
+        shell: pwsh
+        run: |
+          $tag = '${{ github.event.inputs.tag }}'
+          if (-not $tag) { $tag = '${{ github.ref_name }}' }
+          $version = $tag.TrimStart('v')
+
+          # The tag and the repository must agree, or the release lies about
+          # itself: the executables are stamped from Directory.Build.props.
+          $declared = ([xml](Get-Content Directory.Build.props)).SelectSingleNode('//Version').InnerText.Trim()
+          if ($declared -ne $version) {
+            throw "Tag $tag wants $version, but Directory.Build.props declares $declared. Bump the version, merge it, then tag the merge commit."
+          }
+
+          Write-Host "Releasing $version (tag and Directory.Build.props agree)"
+          "tag=$tag"         | Out-File $env:GITHUB_OUTPUT -Append
+          "version=$version" | Out-File $env:GITHUB_OUTPUT -Append
+
+      # The SDK stamps the commit into the product version (1.0.0+<sha>) by itself.
+      - name: Publish
+        shell: pwsh
+        run: ./build.ps1
+
+      - name: Smoke test the console tool
+        shell: pwsh
+        run: |
+          & dist/WhyNotSleepingCli.exe --once --no-elevate --no-log
+          if ($LASTEXITCODE -ne 0) { throw "console tool exited with $LASTEXITCODE" }
+
+      - name: Scan release files with Microsoft Defender
+        shell: pwsh
+        run: |
+          $status = Get-MpComputerStatus -ErrorAction Stop
+          if (-not $status.AntivirusEnabled) {
+            throw 'Microsoft Defender Antivirus is unavailable; refusing to publish an unscanned release.'
+          }
+
+          # Hosted images can carry stale definitions. Best effort: a
+          # definitions outage should not block a release the scan is about to check.
+          try {
+            Update-MpSignature -ErrorAction Stop
+            Write-Host "Defender definitions: $((Get-MpComputerStatus).AntivirusSignatureVersion)"
+          } catch {
+            Write-Warning "Could not update Defender definitions, scanning with what the image has: $($_.Exception.Message)"
+          }
+
+          $scanPath = (Resolve-Path 'dist').Path
+          $scanStartedAt = Get-Date
+          Start-MpScan -ScanType CustomScan -ScanPath $scanPath -ErrorAction Stop
+
+          $threats = @(Get-MpThreatDetection -ErrorAction SilentlyContinue | Where-Object {
+            $_.InitialDetectionTime -ge $scanStartedAt -and
+            ($_.Resources | Where-Object { $_ -like "*$scanPath*" } | Measure-Object).Count -gt 0
+          })
+          if ($threats) {
+            $names = ($threats | ForEach-Object ThreatName | Select-Object -Unique) -join ', '
+            throw "Microsoft Defender detected a threat in the release files: $names"
+          }
+
+          # Defender quarantines what it detects, so a missing file is a detection too.
+          $missing = 'dist/WhyNotSleeping.exe', 'dist/WhyNotSleepingCli.exe' | Where-Object { -not (Test-Path $_) }
+          if ($missing) { throw "Microsoft Defender removed a release file: $($missing -join ', ')" }
+
+          Write-Host "Microsoft Defender scanned the release files in $scanPath."
+
+      - name: Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # What changed comes from the README's release notes, so it is written
+          # once and cannot drift from what the repository says. Single-quoted
+          # and concatenated so PowerShell leaves the regex's $ alone.
+          $version = '${{ steps.version.outputs.version }}'
+          $readme = Get-Content README.md -Raw
+          $pattern = '(?ms)^### ' + [regex]::Escape($version) + '\s*$(.*?)(?=^##+ |\z)'
+          $section = [regex]::Match($readme, $pattern)
+          if ($section.Success) {
+            $changed = "### What changed`n" + $section.Groups[1].Value.Trim() + "`n`n"
+          } else {
+            Write-Host "::warning::No '### $version' section in README.md; releasing without a changelog."
+            $changed = ''
+          }
+
+          $notes = @"
+          **WhyNotSleeping $version** - find out what is keeping your PC awake or your screen on.
+
+          $changed
+          ### Getting it running
+
+          Download **WhyNotSleeping.exe** and double-click it. Nothing to install or unpack.
+          It asks for administrator rights (the UAC prompt) because only an administrator can
+          see which apps and drivers are keeping Windows awake; say no and it still shows
+          your power settings, the screen state and your input devices.
+
+          **WhyNotSleepingCli.exe** is the same monitor in a console window, for scripting
+          or leaving running overnight. Run it with ``--help`` for options.
+
+          Windows may warn that the publisher is unknown - the executables are not code
+          signed. Choose **More info**, then **Run anyway**.
+          "@
+          gh release create '${{ steps.version.outputs.tag }}' `
+            dist/WhyNotSleeping.exe dist/WhyNotSleepingCli.exe `
+            --title 'WhyNotSleeping ${{ steps.version.outputs.version }}' `
+            --notes $notes

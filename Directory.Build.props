@@ -1,0 +1,30 @@
+<Project>
+
+  <!-- Shared metadata and settings for the core library, the window and the console tool. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <Authors>nekron</Authors>
+    <Company>nekron</Company>
+    <Product>WhyNotSleeping</Product>
+    <Copyright>Copyright © nekron</Copyright>
+    <Description>Shows what is keeping Windows from going to sleep or turning the screen off.</Description>
+
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+
+    <RepositoryUrl>https://github.com/peans99/WhyNotSleeping</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/peans99/WhyNotSleeping</PackageProjectUrl>
+
+    <RuntimeIdentifier Condition="'$(OutputType)' != 'Library'">win-x64</RuntimeIdentifier>
+  </PropertyGroup>
+
+  <!-- Releases are single self-contained executables: nothing to install, no symbols beside them. -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+
+</Project>

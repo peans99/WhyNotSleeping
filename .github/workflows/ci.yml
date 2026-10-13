@@ -1,0 +1,131 @@
+name: CI
+
+# Windows only, and not by preference: everything here is net10.0-windows -
+# power requests, raw input and WinForms are Windows APIs.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore WhyNotSleeping.slnx
+
+      - name: Build
+        run: dotnet build WhyNotSleeping.slnx -c Release --no-restore -warnaserror
+
+      # Publishing is where trimming happens, and a trimmed-away P/Invoke or
+      # marshalled struct only fails at run time. So publish exactly what a
+      # release ships and run the console tool once: a snapshot that prints
+      # its sections means power settings, powercfg parsing, display
+      # notifications and raw input all survived the trimmer.
+      - name: Publish both executables
+        shell: pwsh
+        run: ./build.ps1
+
+      - name: Smoke test the console tool
+        shell: pwsh
+        run: |
+          $output = & dist/WhyNotSleepingCli.exe --once --no-elevate --no-log | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "exited with $LASTEXITCODE`n$output" }
+          Write-Host $output
+          foreach ($section in 'Power plan', "WHY IT'S NOT SLEEPING", "WHY THE SCREEN ISN'T TURNING OFF", 'INPUT DEVICES') {
+            if (-not $output.Contains($section)) { throw "snapshot is missing '$section'" }
+          }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: WhyNotSleeping-${{ github.sha }}
+          path: dist/*.exe
+
+  # A release is cut from a tag, and the release workflow refuses a tag that
+  # disagrees with Directory.Build.props. That catches a forgotten bump, but
+  # only at the last moment. This catches it in review instead: a change to
+  # the app moves the version and says what changed in the README, or says
+  # why it doesn't need to.
+  #
+  # Ubuntu on purpose: this is git and grep, and needs none of the SDK.
+  version:
+    name: Version bumped with release notes
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: An app change must bump the version
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+
+          app=$(git diff --name-only "$BASE"...HEAD | grep -E '^src/' || true)
+          if [ -z "$app" ]; then
+            echo "No app source touched; no release needed."
+            exit 0
+          fi
+
+          echo "App files in this change:"
+          echo "$app" | sed 's/^/  /'
+
+          old=$(git show "$BASE":Directory.Build.props | grep -oP '(?<=<Version>)[^<]+' || true)
+          new=$(grep -oP '(?<=<Version>)[^<]+' Directory.Build.props)
+
+          if [ "$old" != "$new" ]; then
+            echo
+            echo "Version moves from $old to $new."
+            # Counted, not `grep -q`: an early exit closes the pipe, which
+            # `pipefail` would report as a failure.
+            notes=$(grep -cxF "### $new" README.md || true)
+            if [ "$notes" -eq 0 ]; then
+              echo "::error::Version $new has no '### $new' section in README.md."
+              echo "::error::The release page's notes are built from that section - add one under 'Release notes'."
+              exit 1
+            fi
+            echo "README.md has release notes for $new."
+            exit 0
+          fi
+
+          # A comment fix or a refactor that changes nothing for users can say
+          # so. A trailer anchored to the start of a line, so prose that names
+          # the trailer does not invoke it.
+          waived=$(git log "$BASE"..HEAD --format='%B' \
+            | grep -ciE '^No-version-bump:[[:space:]]*[^[:space:]]' || true)
+
+          if [ "$waived" -gt 0 ]; then
+            echo
+            echo "Waived by a commit trailer:"
+            git log "$BASE"..HEAD --format='%B' | grep -iE '^No-version-bump:' | sed 's/^/  /'
+            exit 0
+          fi
+
+          echo
+          echo "::error::This change touches src/ but <Version> in Directory.Build.props does not move."
+          echo "::error::Bump it and add a '### <version>' section to the README's release notes, or,"
+          echo "::error::if nothing a user would notice changed, add a commit trailer on its own line:"
+          echo "::error::"
+          echo "::error::    No-version-bump: renamed a private method, same behaviour"
+          exit 1

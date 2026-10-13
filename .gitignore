@@ -1,0 +1,21 @@
+# Build results
+[Bb]in/
+[Oo]bj/
+dist/
+artifacts/
+*.binlog
+
+# The monitor's event log, written next to wherever the console tool runs
+whynotsleeping.log
+
+# IDE and editor
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+*.swp
+
+# OS
+Thumbs.db
+desktop.ini

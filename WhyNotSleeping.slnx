@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/WhyNotSleeping.Cli/WhyNotSleeping.Cli.csproj" />
+    <Project Path="src/WhyNotSleeping.Core/WhyNotSleeping.Core.csproj" />
+    <Project Path="src/WhyNotSleeping.Gui/WhyNotSleeping.Gui.csproj" />
+  </Folder>
+</Solution>
