@@ -24,7 +24,7 @@ Two verdicts at the top, **Sleep** and **Screen**, each saying in plain words wh
 
 - **Your power plan**: when the PC sleeps and the screen turns off ("Never" is the most common culprit), whether you're plugged in, how long you've been idle, and whether the screen is actually on, off or dimmed.
 - **Keeping it awake**: the apps, services and drivers asking Windows to stay awake (audio streams, video playback, downloads, Windows Update...) and how long each has been holding on. Right-click an app to ignore its requests or open its folder.
-- **Input devices**: every mouse, keyboard, game controller, touchpad, touch screen, pen, media-key remote and power button that sent input, by name (e.g. "Razer Basilisk V3"), and which ones actually reset the idle timer. Controllers with jittery axes and software-injected input (remote desktop, mouse jigglers) are flagged.
+- **Input devices**: every mouse, keyboard, game controller, touchpad, touch screen, pen, media-key remote and power button that sent input, by name (e.g. "Razer Basilisk V3"), which ones actually reset the idle timer, and what each one is sending ("key Num Enter", "mouse moved", "vendor channel 2 jittering between 33856 and 33879"). Click a controller to watch its axes and buttons live. Jittery controls and software-injected input (remote desktop, mouse jigglers) are flagged.
 - **Event log**: requests appearing and disappearing, power changes, the screen turning off and on (and how late that was compared to the timeout), input after a quiet spell, and gaps where the PC was actually asleep. It's also saved to `%LOCALAPPDATA%\WhyNotSleeping\whynotsleeping.log`, so you can leave it running overnight and check in the morning what woke the screen at 3am.
 - **Ignored apps**: apps whose requests Windows has been told to disregard, with a button to stop ignoring them.
 
@@ -48,13 +48,17 @@ Two verdicts at the top, **Sleep** and **Screen**, each saying in plain words wh
 
 ### A controller, joystick or HOTAS keeps the screen on
 
-Windows doesn't usually count game-controller input as you being there, but some devices get counted anyway:
+Some controllers reset Windows' idle timer every time they send a report, and a controller with a noisy sensor sends reports all the time, even when nobody touches it. To find out which part is doing it, open **Input devices**, click the controller and leave it alone for a minute. The list below shows every axis and button live. Whatever you move or press lights up, and a control that keeps changing on its own is marked as jittering.
 
-- **Noisy axes.** A throttle, stick, wheel or pedal whose analog axis jitters by a hair sends input all the time, even when nobody touches it. Recalibrate it, or add a small deadzone in the vendor's software (VKB DevCfg, VPC Configurator, Thrustmaster TARGET, Logitech G HUB...).
-- **Keyboard or mouse modes.** Many HOTAS and button boxes also show up as a keyboard or mouse, or their software (TARGET, Joystick Gremlin, Steam Input) turns axes and buttons into key presses. That *is* keyboard input as far as Windows can tell. Look in **Input devices** for a keyboard or mouse with your stick's name, and check the device's software for mappings that send keys or mouse movement.
-- **When nothing else helps,** unplug it (or use a USB hub with power switches) when you're not playing, or disable it in Device Manager and re-enable it before you fly.
+![The live controls of a HOTAS Warthog joystick: X and Y are still, two vendor channels jitter](docs/screenshot-controller.png)
 
-The **Input devices** tab shows which device reset the idle timer and how often in the last minute, and the verdict cards name it, so you can check a fix worked.
+That screenshot is a real Thrustmaster HOTAS Warthog that nobody was touching. Its X and Y axes don't move, but it also reports two **vendor channels**, a raw copy of the stick's position that games don't read, and those wander by a few counts thousands of times a minute. That alone reset the idle timer over 1,300 times a minute.
+
+- **A jittering axis** (X, Y, throttle, slider...): recalibrate it, or add a small deadzone in the vendor's software (VKB DevCfg, VPC Configurator, Thrustmaster TARGET, Logitech G HUB...).
+- **A jittering vendor channel:** no game setting, deadzone or calibration reaches it. Unplug the device when you're not using it (a USB hub with power switches makes that easy), or disable it in Device Manager and re-enable it before you play.
+- **Keyboard or mouse modes:** many HOTAS and button boxes also show up as a keyboard or mouse, or their software (TARGET, Joystick Gremlin, Steam Input) turns axes and buttons into key presses. Look in **Input devices** for a keyboard or mouse with your stick's name: the *What it's sending* column says which key or movement it is.
+
+The verdict cards name the device and the control, so you can check a fix worked.
 
 ## Console version
 
@@ -103,6 +107,7 @@ The release workflow refuses a tag that disagrees with `Directory.Build.props`. 
 
 - First release: a window (`WhyNotSleeping.exe`) and a console monitor (`WhyNotSleepingCli.exe`), both single self-contained executables.
 - Verdicts for sleep and the screen: power plan timeouts, power requests, display state, and input devices that reset the idle timer.
+- Says what each input device is sending, and shows a controller's axes and buttons live, so a jittering axis or channel can be pinned down to the exact control.
 - Ignore an app's power requests from the window, and stop ignoring it again.
 - Follows the Windows light/dark setting.
 

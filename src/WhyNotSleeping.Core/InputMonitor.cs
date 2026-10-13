@@ -11,16 +11,48 @@ internal enum InputKind { Mouse, Keyboard, Controller, Touchpad, Touch, Pen, Med
 /// <summary>
 /// A device that has sent input since the monitor started. Not all input counts as user activity: game controllers
 /// usually don't reset Windows' idle timer, so IdleResets tells which devices actually keep the PC from idling.
+/// LastChange is what the latest input was ("Rz axis 510 → 513", "key F13"); Busiest is the control that changed most
+/// in the last minute, which is how a jittery axis gives itself away.
 /// </summary>
-internal sealed record InputSource(InputKind Kind, string Name, DateTime LastInput, long Events,
-    DateTime? LastIdleReset, long IdleResets, int ResetsLastMinute)
+internal sealed record InputSource(long Id, InputKind Kind, string Name, DateTime LastInput, long Events,
+    DateTime? LastIdleReset, long IdleResets, int ResetsLastMinute, string? LastChange, ControlStatus? Busiest)
 {
     /// <summary>Mouse and keyboard input is normally the user; anything else resetting the timer is worth pointing out.</summary>
     public bool Suspicious => Kind is not (InputKind.Mouse or InputKind.Keyboard) && ResetsLastMinute > 0;
+
+    /// <summary>The busiest control of the last minute, or else the latest input.</summary>
+    public string? WhatItSends => Busiest?.Describe() ?? LastChange;
+
+    /// <summary>"Joystick - HOTAS Warthog", without the "(VID 044F PID 0402)".</summary>
+    public string ShortName => Name.EndsWith(')') && Name.LastIndexOf(" (VID ", StringComparison.Ordinal) is var i and > 0 ? Name[..i] : Name;
+}
+
+/// <summary>One axis or button of a device: its value now, and how much it moved in the last minute.</summary>
+internal sealed record ControlStatus(string Name, bool IsAxis, long? Value, long LogicalMin, long LogicalMax, int Changes, long? Min, long? Max)
+{
+    static readonly string[] HatDirections = ["up", "up-right", "right", "down-right", "down", "down-left", "left", "up-left"];
+
+    /// <summary>
+    /// Lots of changes within a sliver of the range: nobody moves a stick that finely, a noisy sensor does. Only for
+    /// analog axes; a hat switch or a 3-bit dial has no sliver to wander in.
+    /// </summary>
+    public bool Jitter => IsAxis && LogicalMax - LogicalMin >= 64 && Changes >= 10 && Max - Min <= Math.Max(2, (LogicalMax - LogicalMin) / 25);
+
+    /// <summary>"33978", "pressed", or for an 8-way hat "up-left" / "centered" (out of range means centered).</summary>
+    public string DisplayValue =>
+        !IsAxis ? (Value == 1 ? "pressed" : "released")
+        : Name == "hat switch" && LogicalMax - LogicalMin == 7
+            ? Value is { } v && v >= LogicalMin && v <= LogicalMax ? HatDirections[v - LogicalMin] : "centered"
+        : Value?.ToString() ?? "";
+
+    public string Describe() =>
+        !IsAxis ? $"{Name}: {Changes} change{(Changes == 1 ? "" : "s")} in the last minute"
+        : Jitter ? $"{Name} jittering between {Min} and {Max} ({Changes} changes in the last minute)"
+        : $"{Name}: {Changes} change{(Changes == 1 ? "" : "s")} in the last minute, between {Min} and {Max} of {LogicalMin}–{LogicalMax}";
 }
 
 /// <summary>Input that reset the idle timer after a quiet period: what ended the idle time (e.g. a mouse nudged at 3am).</summary>
-internal sealed record InputResumed(DateTime Time, InputKind Kind, string Name, TimeSpan Quiet);
+internal sealed record InputResumed(DateTime Time, InputKind Kind, string Name, TimeSpan Quiet, string? What);
 
 /// <summary>
 /// Watches raw input from every mouse, keyboard, game controller, touchpad, touch screen, pen and media/power-key device,
@@ -47,8 +79,9 @@ internal static partial class InputMonitor
         (0x0D, 0x05), // precision touchpad
     ];
 
-    sealed class Device(InputKind kind, string name)
+    sealed class Device(IntPtr handle, InputKind kind, string name)
     {
+        public readonly IntPtr Handle = handle;
         public readonly InputKind Kind = kind;
         public readonly string Name = name;
         public DateTime LastInput;
@@ -57,6 +90,29 @@ internal static partial class InputMonitor
         public long IdleResets;
         public readonly Queue<DateTime> RecentResets = new();
         public byte[]? LastReport; // HID only
+        public HidDecoder? Decoder; // HID only
+        public string? LastChange;
+        public readonly Dictionary<string, ControlHistory> Controls = new();
+    }
+
+    /// <summary>A control's values over the last minute. Capped, since a jittery axis can report a thousand times a second.</summary>
+    sealed class ControlHistory(bool isAxis, long logicalMin, long logicalMax)
+    {
+        public readonly bool IsAxis = isAxis;
+        public readonly long LogicalMin = logicalMin, LogicalMax = logicalMax;
+        public readonly Queue<(DateTime Time, long Value)> Recent = new();
+
+        public void Add(DateTime now, long value)
+        {
+            Recent.Enqueue((now, value));
+            if (Recent.Count > 5000) Recent.Dequeue();
+        }
+
+        public void Trim(DateTime now)
+        {
+            while (Recent.TryPeek(out var r) && now - r.Time > TimeSpan.FromMinutes(1))
+                Recent.Dequeue();
+        }
     }
 
     // The message loop runs on its own thread; the main loop reads snapshots under this lock.
@@ -97,10 +153,42 @@ internal static partial class InputMonitor
             foreach (var device in Devices.Values)
                 TrimResets(device, now);
             return Devices.Values.Where(d => d.Events > 0)
-                .Select(d => new InputSource(d.Kind, d.Name, d.LastInput, d.Events, d.LastIdleReset, d.IdleResets, d.RecentResets.Count))
+                .Select(d => new InputSource((long)d.Handle, d.Kind, d.Name, d.LastInput, d.Events, d.LastIdleReset, d.IdleResets,
+                    d.RecentResets.Count, d.LastChange, Statuses(d, now).Where(c => c.Changes > 0).MaxBy(c => c.Changes)))
                 .OrderByDescending(s => s.LastInput)
                 .ToList();
         }
+    }
+
+    /// <summary>
+    /// Every axis and button of a device with its value now and its last minute, for watching which one moves
+    /// (like Windows' game controller panel). Empty for devices that aren't decoded, such as mice and keyboards.
+    /// </summary>
+    public static List<ControlStatus> Controls(long id)
+    {
+        lock (Sync)
+            return Devices.TryGetValue((IntPtr)id, out var device) ? Statuses(device, DateTime.Now) : [];
+    }
+
+    static List<ControlStatus> Statuses(Device device, DateTime now)
+    {
+        var result = new List<ControlStatus>();
+        if (device.Decoder is null) return result;
+        foreach (var (name, isAxis, value, min, max) in device.Decoder.Readings())
+            result.Add(Status(name, isAxis, value, min, max, device.Controls.GetValueOrDefault(name), now));
+        // Buttons released by now but pressed in the last minute.
+        foreach (var (name, history) in device.Controls)
+            if (!history.IsAxis && result.All(r => r.Name != name) && Status(name, false, 0, 0, 1, history, now) is { Changes: > 0 } released)
+                result.Add(released);
+        return result;
+    }
+
+    static ControlStatus Status(string name, bool isAxis, long? value, long min, long max, ControlHistory? history, DateTime now)
+    {
+        history?.Trim(now);
+        return history is { Recent.Count: > 0 }
+            ? new ControlStatus(name, isAxis, value, min, max, history.Recent.Count, history.Recent.Min(r => r.Value), history.Recent.Max(r => r.Value))
+            : new ControlStatus(name, isAxis, value, min, max, 0, null, null);
     }
 
     static void TrimResets(Device device, DateTime now)
@@ -156,23 +244,32 @@ internal static partial class InputMonitor
             var header = Marshal.PtrToStructure<Native.RawInputHeader>(buffer);
             var data = buffer + (int)headerSize;
             byte[]? report = null;
+            var reportSize = 0;
+            string? change = null;
 
             switch (header.Type)
             {
                 case Native.RimTypeMouse:
                     // RAWMOUSE: usFlags, usButtonFlags @4 (buttons and wheel), lLastX @12, lLastY @16. Some mice send empty reports.
-                    if (Marshal.ReadInt16(data, 4) == 0 && Marshal.ReadInt32(data, 12) == 0 && Marshal.ReadInt32(data, 16) == 0)
+                    var buttons = (ushort)Marshal.ReadInt16(data, 4);
+                    if (buttons == 0 && Marshal.ReadInt32(data, 12) == 0 && Marshal.ReadInt32(data, 16) == 0)
                         return;
+                    change = (buttons & 0x0C00) != 0 ? "mouse wheel" : buttons != 0 ? "mouse button" : "mouse moved";
+                    break;
+                case Native.RimTypeKeyboard:
+                    // RAWKEYBOARD: MakeCode @0, Flags @2 (RI_KEY_E0 = 2), VKey @6
+                    change = DescribeKey((ushort)Marshal.ReadInt16(data, 0), (ushort)Marshal.ReadInt16(data, 2), (ushort)Marshal.ReadInt16(data, 6));
                     break;
                 case Native.RimTypeHid:
                     // RAWHID: dwSizeHid, dwCount, bRawData[dwSizeHid * dwCount]
-                    var length = (long)Marshal.ReadInt32(data, 0) * Marshal.ReadInt32(data, 4);
+                    reportSize = Marshal.ReadInt32(data, 0);
+                    var length = (long)reportSize * Marshal.ReadInt32(data, 4);
                     if (length <= 0 || 8 + length > size - headerSize) return;
                     report = new byte[length];
                     Marshal.Copy(data + 8, report, 0, (int)length);
                     break;
             }
-            Record(header.Device, header.Type, report, time);
+            Record(header.Device, header.Type, report, reportSize, change, time);
         }
         finally
         {
@@ -180,7 +277,7 @@ internal static partial class InputMonitor
         }
     }
 
-    static void Record(IntPtr handle, uint type, byte[]? report, uint time)
+    static void Record(IntPtr handle, uint type, byte[]? report, int reportSize, string? change, uint time)
     {
         var now = DateTime.Now;
         lock (Sync)
@@ -191,13 +288,18 @@ internal static partial class InputMonitor
             if (report != null)
             {
                 // Controllers stream their state continuously; only a changed report means someone touched it.
-                var unchanged = device.LastReport is null || report.AsSpan().SequenceEqual(device.LastReport);
+                var first = device.LastReport is null;
+                var unchanged = first || report.AsSpan().SequenceEqual(device.LastReport);
                 device.LastReport = report;
-                if (unchanged) return;
+                if (unchanged && !first) return;
+                change = DecodeHid(device, report, reportSize, now); // the first report only sets the baseline
+                if (first) return;
+                change ??= "vendor data";
             }
 
             device.Events++;
             device.LastInput = now;
+            if (change != null) device.LastChange = change;
 
             // Windows stamps the last-input time with the time of the input that reset it, so the first input whose
             // message time matches a new last-input time is the one that reset the idle timer. The tick is ~16ms,
@@ -211,7 +313,7 @@ internal static partial class InputMonitor
             device.RecentResets.Enqueue(now);
             TrimResets(device, now);
             if (now - _lastReset >= QuietThreshold)
-                Pending.Enqueue(new InputResumed(now, device.Kind, device.Name, now - _lastReset));
+                Pending.Enqueue(new InputResumed(now, device.Kind, device.Name, now - _lastReset, device.LastChange));
             _lastReset = now;
         }
     }
@@ -219,14 +321,46 @@ internal static partial class InputMonitor
     static Device Identify(IntPtr handle, uint type)
     {
         if (handle == IntPtr.Zero)
-            return new Device(InputKind.Software, "no physical device: injected input (remote desktop, automation, mouse-jiggler app...)");
+            return new Device(handle, InputKind.Software, "no physical device: injected input (remote desktop, automation, mouse-jiggler app...)");
         var kind = type switch
         {
             Native.RimTypeMouse => InputKind.Mouse,
             Native.RimTypeKeyboard => InputKind.Keyboard,
             _ => ClassifyHid(handle),
         };
-        return new Device(kind, DescribeDevice(handle));
+        return new Device(handle, kind, DescribeDevice(handle)) { Decoder = type == Native.RimTypeHid ? HidDecoder.Create(handle) : null };
+    }
+
+    /// <summary>Records what each control did and returns the latest change, e.g. "Rz axis 510 → 513".</summary>
+    static string? DecodeHid(Device device, byte[] reports, int reportSize, DateTime now)
+    {
+        if (device.Decoder is null || reportSize <= 0) return null;
+        ControlChange? last = null;
+        for (var offset = 0; offset + reportSize <= reports.Length; offset += reportSize)
+        {
+            foreach (var change in device.Decoder.Decode(reports[offset..(offset + reportSize)]))
+            {
+                if (!device.Controls.TryGetValue(change.Control, out var history))
+                    device.Controls[change.Control] = history = new ControlHistory(change.IsAxis, change.LogicalMin, change.LogicalMax);
+                history.Add(now, change.Value);
+                last = change;
+            }
+        }
+        return last?.ToString();
+    }
+
+    /// <summary>
+    /// "key F13", "key Ctrl". Letters, digits and punctuation are only "typing": this says which device is active,
+    /// it is not a keylogger.
+    /// </summary>
+    static string DescribeKey(ushort makeCode, ushort flags, ushort vkey)
+    {
+        var typing = vkey is (>= 0x30 and <= 0x39) or (>= 0x41 and <= 0x5A) or (>= 0x60 and <= 0x6F) or (>= 0xBA and <= 0xC0)
+            or (>= 0xDB and <= 0xDF) or 0xE2 or 0x20;
+        if (typing) return "typing";
+        var name = new StringBuilder(64);
+        var lParam = (makeCode << 16) | ((flags & 2) != 0 ? 1 << 24 : 0);
+        return Native.GetKeyNameText(lParam, name, name.Capacity) > 0 ? $"key {name}" : $"key 0x{vkey:X2}";
     }
 
     static InputKind ClassifyHid(IntPtr handle)

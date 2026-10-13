@@ -196,7 +196,7 @@ internal static class Program
         else
             lines.Add(new($"  {"DEVICE",-13} {"LAST INPUT",-12} {"EVENTS",8} {"IDLE RESETS",12} {"LAST MIN",9}   NAME", ConsoleColor.DarkGray));
         foreach (var input in s.Inputs.Take(8))
-            lines.Add(new($"  {InputMonitor.Label(input.Kind),-13} {Format.Duration(s.Time - input.LastInput) + " ago",-12} {input.Events,8} {input.IdleResets,12} {input.ResetsLastMinute,9}   {input.Name}",
+            lines.Add(new($"  {InputMonitor.Label(input.Kind),-13} {Format.Duration(s.Time - input.LastInput) + " ago",-12} {input.Events,8} {input.IdleResets,12} {input.ResetsLastMinute,9}   {input.Name}{(input.WhatItSends is { } what ? $"  [{what}]" : "")}",
                 input.Suspicious ? ConsoleColor.Red : input.IdleResets == 0 ? ConsoleColor.DarkGray : ConsoleColor.Gray));
 
         // Recent events fill whatever space is left

@@ -79,8 +79,14 @@ internal static class Diagnosis
     /// <summary>Devices other than mouse/keyboard that reset the idle timer recently, e.g. a controller with jittery axes.</summary>
     static IEnumerable<Finding> Input(Snapshot s) =>
         s.Inputs.Where(i => i.Suspicious).OrderByDescending(i => i.ResetsLastMinute).Select(i => new Finding(Severity.Problem,
-            $"{InputMonitor.Label(i.Kind)} '{i.Name}' reset the idle timer {i.ResetsLastMinute} time(s) in the last minute" +
-            (i.Kind == InputKind.Software ? " - something is injecting input." : " - if nobody is using it, unplug it (noisy axes/sensors count as activity).")));
+            $"{InputMonitor.Label(i.Kind)} '{i.ShortName}' reset the idle timer {i.ResetsLastMinute} time(s) in the last minute" +
+            (i.Kind == InputKind.Software ? " - something is injecting input."
+                // Vendor channels are data games never read, so no deadzone or calibration reaches them.
+                : i.Busiest is { Jitter: true, Name: var name } vendor && name.StartsWith("vendor channel")
+                    ? $": its {name} (raw data games don't use) is jittering ({vendor.Min}–{vendor.Max}) - settings can't fix that; unplug it when you're not using it."
+                : i.Busiest is { Jitter: true } jitter ? $": its {jitter.Name} is jittering ({jitter.Min}–{jitter.Max}) - recalibrate it, add a deadzone, or unplug it."
+                : i.Busiest is { } busiest ? $", mostly its {busiest.Name} - if nobody is using it, unplug it."
+                : " - if nobody is using it, unplug it.")));
 
     public static string DescribeDisplayChange(DisplayChange change, PowerState power)
     {
@@ -96,7 +102,7 @@ internal static class Diagnosis
     }
 
     public static string DescribeInputResumed(InputResumed r) =>
-        $"* input after {Format.Duration(r.Quiet)} quiet: {InputMonitor.Label(r.Kind)} - {r.Name}";
+        $"* input after {Format.Duration(r.Quiet)} quiet: {InputMonitor.Label(r.Kind)} - {r.Name}{(r.What is { } what ? $" ({what})" : "")}";
 
     public static string DescribeLastInput(Snapshot s) =>
         s.Inputs.Where(i => i.LastIdleReset != null).MaxBy(i => i.LastIdleReset) is { } last

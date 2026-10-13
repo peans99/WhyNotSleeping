@@ -32,6 +32,10 @@ internal sealed class MainForm : Form
     readonly Fact _plan = new("Power plan"), _source = new("Power source"), _sleepAfter = new("Sleep after"),
         _screenAfter = new("Screen off after"), _idle = new("Idle for"), _screen = new("Screen is");
     readonly ItemList _requests, _inputs, _events, _overrides;
+    readonly ItemList _controls = NewList(("Control", 170), ("Now", 90), ("Changes (last minute)", 150), ("Range (last minute)", 170), ("", 200));
+    readonly System.Windows.Forms.Timer _live = new() { Interval = 150 };
+    readonly Dictionary<string, (long? Value, DateTime Changed)> _seen = new(); // for lighting up what just moved
+    long? _liveDevice;
     readonly Button _unignore;
     readonly ToolStripMenuItem _ignoreItem, _locateItem;
     readonly Label _status;
@@ -121,7 +125,7 @@ internal sealed class MainForm : Form
         };
         _requests.ContextMenuStrip = requestMenu;
 
-        _inputs = NewList(("Device", 110), ("Name", 330), ("Last input", 110), ("Events", 80), ("Idle resets", 90), ("Last minute", 90));
+        _inputs = NewList(("Device", 100), ("Name", 250), ("Last input", 90), ("Idle resets", 80), ("Last minute", 85), ("What it's sending", 300));
         _events = NewList(("Time", 150), ("Event", 760));
         _overrides = NewList(("Type", 100), ("Name", 300), ("Ignored requests", 260));
 
@@ -137,8 +141,25 @@ internal sealed class MainForm : Form
         var tabs = new TabControl { Dock = DockStyle.Fill, Padding = new Point(14, 5) };
         tabs.TabPages.Add(Page("Keeping it awake",
             "Apps, services and drivers asking Windows to keep the PC or the screen awake. Right-click one for options.", _requests));
-        tabs.TabPages.Add(Page("Input devices",
-            "Every device that sent input since this window opened. Only input that resets the idle timer delays sleep and screen-off.", _inputs));
+        // Input devices on top, the selected device's axes and buttons live below.
+        var inputSplit = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Margin = Padding.Empty };
+        inputSplit.RowStyles.Add(new RowStyle(SizeType.Percent, 45));
+        inputSplit.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        inputSplit.RowStyles.Add(new RowStyle(SizeType.Percent, 55));
+        inputSplit.Controls.Add(Cell(_inputs), 0, 0);
+        inputSplit.Controls.Add(new Label
+        {
+            Text = "Controls of the selected device, live: move a stick or press a button and its row lights up.",
+            AutoSize = true, ForeColor = Muted, Margin = new Padding(0, 10, 0, 6),
+        }, 0, 1);
+        inputSplit.Controls.Add(Cell(_controls), 0, 2);
+        var inputsPage = Page("Input devices",
+            "Every device that sent input since this window opened. Only input that resets the idle timer delays sleep and screen-off.", inputSplit);
+        tabs.TabPages.Add(inputsPage);
+        Fill(_controls, [], "Select a controller above to see its axes and buttons.");
+        // Polled rather than driven by SelectedIndexChanged, which also fires while a refresh rebuilds the list.
+        _live.Tick += (_, _) => { if (tabs.SelectedTab == inputsPage) ShowControls(); };
+        _live.Start();
         tabs.TabPages.Add(Page("Event log",
             logPath is null ? "What changed, newest first." : $"What changed, newest first. Also saved to {logPath}", _events, openLog, openFolder));
         tabs.TabPages.Add(Page("Ignored apps",
@@ -185,6 +206,7 @@ internal sealed class MainForm : Form
 
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
+        _live.Stop();
         _monitor.Stop();
         base.OnFormClosed(e);
     }
@@ -243,13 +265,73 @@ internal sealed class MainForm : Form
     {
         var empty = InputMonitor.Available ? "No input seen yet." : "Raw input is unavailable.";
         Fill(_inputs, s.Inputs.Select(i => new ListViewItem([
-            InputMonitor.Label(i.Kind), i.Name, Format.Duration(s.Time - i.LastInput) + " ago",
-            i.Events.ToString("N0"), i.IdleResets.ToString("N0"), i.ResetsLastMinute.ToString("N0")])
+            InputMonitor.Label(i.Kind), i.ShortName, Format.Duration(s.Time - i.LastInput) + " ago",
+            i.IdleResets.ToString("N0"), i.ResetsLastMinute.ToString("N0"), i.WhatItSends ?? ""])
         {
-            Tag = i.Kind + i.Name,
-            ToolTipText = i.Suspicious ? "This device keeps resetting the idle timer. If nobody is using it, unplug it." : i.Name,
+            Tag = i,
+            ToolTipText = (i.Suspicious ? "This device keeps resetting the idle timer. If nobody is using it, unplug it.\n" : "") + i.Name + (i.WhatItSends is { } what ? "\n" + what : ""),
             ForeColor = i.Suspicious ? Red : i.IdleResets == 0 ? Muted : ForeColor,
         }), empty);
+    }
+
+    /// <summary>
+    /// The selected device's axes and buttons, refreshed several times a second while the tab is open. A row lights
+    /// up for a moment when its value changes, which is how to find which physical control "vendor channel 2" is.
+    /// </summary>
+    void ShowControls()
+    {
+        if (Selected(_inputs) is not InputSource device)
+        {
+            _liveDevice = null;
+            Fill(_controls, [], "Select a controller above to see its axes and buttons.");
+            return;
+        }
+        if (_liveDevice != device.Id)
+        {
+            _liveDevice = device.Id;
+            _seen.Clear();
+        }
+
+        var now = DateTime.Now;
+        var controls = InputMonitor.Controls(device.Id);
+        var rows = controls.Select(c =>
+        {
+            var changed = _seen.TryGetValue(c.Name, out var seen) && seen.Value != c.Value ? now : seen.Changed;
+            _seen[c.Name] = (c.Value, changed);
+            var lit = now - changed < TimeSpan.FromSeconds(1);
+            var note = c.Jitter ? "jittering: a noisy sensor sends input while nobody touches it"
+                : lit ? (c.IsAxis ? "moving" : "pressed")
+                : "";
+            return (Key: c.Name, Cells: new[]
+            {
+                c.Name,
+                c.DisplayValue,
+                c.Changes == 0 ? "" : c.Changes.ToString("N0"),
+                c.IsAxis && c.Min != null ? $"{c.Min}–{c.Max}" : "",
+                note,
+            }, Color: c.Jitter ? Red : lit ? Blue : c.Changes == 0 ? Muted : TextColor, Status: c);
+        }).ToList();
+
+        // Update in place when the rows are the same controls, so the list doesn't flicker or lose its scroll position.
+        if (_controls.Items.Count == rows.Count && rows.Count > 0 &&
+            rows.Select((r, i) => (r, i)).All(x => (_controls.Items[x.i].Tag as ControlStatus)?.Name == x.r.Key))
+        {
+            _controls.BeginUpdate();
+            for (var i = 0; i < rows.Count; i++)
+            {
+                var item = _controls.Items[i];
+                item.Tag = rows[i].Status;
+                item.ForeColor = rows[i].Color;
+                for (var c = 0; c < rows[i].Cells.Length; c++)
+                    if (item.SubItems[c].Text != rows[i].Cells[c]) item.SubItems[c].Text = rows[i].Cells[c];
+            }
+            _controls.EndUpdate();
+            return;
+        }
+        Fill(_controls, rows.Select(r => new ListViewItem(r.Cells) { Tag = r.Status, ForeColor = r.Color }),
+            device.Kind is InputKind.Mouse or InputKind.Keyboard
+                ? "Mice and keyboards have no axes to show here; the list above says what they sent."
+                : "Windows doesn't describe this device's controls.");
     }
 
     /// <summary>Appends only events not shown yet (newest first), so the list keeps its scroll position.</summary>
@@ -382,19 +464,19 @@ internal sealed class MainForm : Form
             PowerRequest r => r.Key,
             RequestOverride o => o.ToString(),
             string s => s,
+            InputSource i => i.Id.ToString(),
+            ControlStatus c => c.Name,
             _ => null,
         };
     }
 
-    static TabPage Page(string title, string description, ItemList list, params Button[] buttons)
+    static TabPage Page(string title, string description, Control content, params Button[] buttons)
     {
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(8) };
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.Controls.Add(new Label { Text = description, AutoSize = true, ForeColor = Muted, Margin = new Padding(0, 0, 0, 6) }, 0, 0);
-        var cell = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
-        cell.Controls.AddRange([list, list.Empty]);
-        layout.Controls.Add(cell, 0, 1);
+        layout.Controls.Add(content is ItemList list ? Cell(list) : content, 0, 1);
         if (buttons.Length > 0)
         {
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -402,16 +484,23 @@ internal sealed class MainForm : Form
             row.Controls.AddRange(buttons);
             layout.Controls.Add(row, 0, 2);
         }
-        // Stretch the last column to the list's width.
+        var page = new TabPage(title) { BackColor = Surface, UseVisualStyleBackColor = false };
+        page.Controls.Add(layout);
+        return page;
+    }
+
+    /// <summary>A list with its empty-state text in the same spot, and its last column stretched to the width.</summary>
+    static Panel Cell(ItemList list)
+    {
+        var cell = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
+        cell.Controls.AddRange([list, list.Empty]);
         list.Resize += (_, _) =>
         {
             if (list.Columns.Count == 0) return;
             var others = list.Columns.Cast<ColumnHeader>().SkipLast(1).Sum(c => c.Width);
             list.Columns[^1].Width = Math.Max(list.ClientSize.Width - others, 120);
         };
-        var page = new TabPage(title) { BackColor = Surface, UseVisualStyleBackColor = false };
-        page.Controls.Add(layout);
-        return page;
+        return cell;
     }
 
     /// <summary>A flicker-free list with a message to show in its place when it is empty.</summary>
@@ -427,7 +516,12 @@ internal sealed class MainForm : Form
     {
         readonly Panel _stripe = new() { Dock = DockStyle.Left, Width = 6 };
         readonly Label _headline = new() { AutoSize = true, Font = new Font("Segoe UI Semibold", 13f), Margin = new Padding(0, 2, 0, 6) };
-        readonly Label _details = new() { Dock = DockStyle.Fill, AutoEllipsis = true };
+        // Scrolls when there are more findings than fit, instead of cutting them off.
+        readonly RichTextBox _details = new()
+        {
+            Dock = DockStyle.Fill, ReadOnly = true, BorderStyle = BorderStyle.None, ScrollBars = RichTextBoxScrollBars.Vertical,
+            TabStop = false, Cursor = Cursors.Default, ForeColor = TextColor,
+        };
 
         public StatusCard(string title)
         {
@@ -455,9 +549,11 @@ internal sealed class MainForm : Form
             };
             _stripe.BackColor = accent;
             BackColor = Palette.Blend(Surface, accent, 0.06); // a hint of the verdict, not a wash of it
+            _details.BackColor = BackColor;
             _headline.ForeColor = accent;
             _headline.Text = headline(worst);
-            _details.Text = string.Join("\n", findings.Select(f => "• " + f.Text));
+            var details = string.Join("\n", findings.Select(f => "• " + f.Text));
+            if (_details.Text != details) _details.Text = details; // setting it scrolls back to the top
         }
     }
 

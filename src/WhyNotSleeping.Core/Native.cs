@@ -107,6 +107,38 @@ internal static class Native
     [DllImport("hid.dll")]
     public static extern bool HidD_GetManufacturerString(SafeFileHandle device, byte[] buffer, uint length);
 
+    public const uint RidiPreparsedData = 0x20000005;
+    public const int HidpStatusSuccess = 0x00110000;
+    public const int HidpInput = 0;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct UsageAndPage
+    {
+        public ushort Usage;
+        public ushort UsagePage;
+    }
+
+    // The preparsed data is an opaque blob from GetRawInputDeviceInfo(RIDI_PREPARSEDDATA); a pinned byte[] stands in for the pointer.
+    [DllImport("hid.dll")]
+    public static extern int HidP_GetCaps(byte[] preparsed, byte[] caps);
+
+    [DllImport("hid.dll")]
+    public static extern int HidP_GetValueCaps(int reportType, byte[] caps, ref ushort length, byte[] preparsed);
+
+    [DllImport("hid.dll")]
+    public static extern int HidP_GetUsageValue(int reportType, ushort usagePage, ushort linkCollection, ushort usage,
+        out uint value, byte[] preparsed, byte[] report, uint reportLength);
+
+    [DllImport("hid.dll")]
+    public static extern int HidP_GetUsagesEx(int reportType, ushort linkCollection, [Out] UsageAndPage[] usages,
+        ref uint length, byte[] preparsed, byte[] report, uint reportLength);
+
+    [DllImport("hid.dll")]
+    public static extern uint HidP_MaxUsageListLength(int reportType, ushort usagePage, byte[] preparsed);
+
+    [DllImport("user32.dll", EntryPoint = "GetKeyNameTextW", CharSet = CharSet.Unicode)]
+    public static extern int GetKeyNameText(int lParam, StringBuilder buffer, int size);
+
     [DllImport("powrprof.dll")]
     public static extern uint PowerSettingRegisterNotification(ref Guid settingGuid, uint flags,
         ref DeviceNotifySubscribeParameters recipient, out IntPtr registrationHandle);
