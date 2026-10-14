@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <EmbeddedResource Include="app.ico" LogicalName="app.ico" />
+    <InternalsVisibleTo Include="WhyNotSleeping.Tests" />
     <ProjectReference Include="..\WhyNotSleeping.Core\WhyNotSleeping.Core.csproj" />
   </ItemGroup>
 

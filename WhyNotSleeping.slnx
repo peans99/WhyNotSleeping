@@ -4,4 +4,7 @@
     <Project Path="src/WhyNotSleeping.Core/WhyNotSleeping.Core.csproj" />
     <Project Path="src/WhyNotSleeping.Gui/WhyNotSleeping.Gui.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/WhyNotSleeping.Tests/WhyNotSleeping.Tests.csproj" />
+  </Folder>
 </Solution>

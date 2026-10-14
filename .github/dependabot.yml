@@ -1,6 +1,7 @@
 version: 2
 
-# Monthly: there are no NuGet dependencies beyond the SDK, so this is mostly the Actions.
+# Monthly: the app itself has no NuGet dependencies beyond the SDK; the test project's xunit packages and the
+# Actions are what this keeps current.
 updates:
   - package-ecosystem: nuget
     directory: '/'

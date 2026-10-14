@@ -235,4 +235,30 @@ internal static class Native
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern uint QueryDosDevice(string deviceName, StringBuilder targetPath, int maxChars);
+
+    public const int QunsBusy = 2;
+    public const int QunsRunningD3dFullScreen = 3;
+    public const int QunsPresentationMode = 4;
+
+    /// <summary>Whether a full-screen app or a presentation is running (QUERY_USER_NOTIFICATION_STATE).</summary>
+    [DllImport("shell32.dll")]
+    public static extern int SHQueryUserNotificationState(out int state);
+
+    public static readonly IntPtr HwndBroadcast = new(0xFFFF);
+    public const uint WmSysCommand = 0x0112;
+    public const int ScMonitorPower = 0xF170;
+    public const uint MsgfltAllow = 1;
+
+    [DllImport("user32.dll", EntryPoint = "PostMessageW")]
+    public static extern bool PostMessage(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", EntryPoint = "RegisterWindowMessageW", CharSet = CharSet.Unicode)]
+    public static extern uint RegisterWindowMessage(string name);
+
+    /// <summary>Lets a message through to an elevated window from a non-elevated process (UIPI).</summary>
+    [DllImport("user32.dll")]
+    public static extern bool ChangeWindowMessageFilterEx(IntPtr hwnd, uint message, uint action, IntPtr changeFilterStruct);
+
+    [DllImport("user32.dll")]
+    public static extern bool AllowSetForegroundWindow(int processId);
 }

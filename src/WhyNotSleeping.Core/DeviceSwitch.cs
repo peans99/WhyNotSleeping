@@ -7,12 +7,14 @@ internal sealed record TurnedOffDevice(string InstanceId, string Name);
 /// Turns an input device off and on again, like Device Manager's Disable and Enable: for a controller whose noisy
 /// sensor keeps the screen on, without unplugging it. It stays off, across restarts and replugging, until turned back
 /// on. The devices turned off here are remembered so the app can always offer to turn them back on.
+/// The away group's devices are turned off only until the next restart instead, and listed apart.
 /// Needs administrator rights.
 /// </summary>
 internal static class DeviceSwitch
 {
-    static readonly string ListPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WhyNotSleeping", "turned-off-devices.txt");
+    static readonly string ListPath = Path.Combine(Settings.Folder, "turned-off-devices.txt");
+    /// <summary>Away-group devices that are off right now, so a crash or a kill can't leave them off for good.</summary>
+    static readonly string AwayPath = Path.Combine(Settings.Folder, "away-devices.txt");
 
     /// <summary>\\?\HID#VID_044F&amp;PID_0402#c&amp;3738ddd0&amp;0&amp;0000#{guid} → HID\VID_044F&amp;PID_0402\c&amp;3738ddd0&amp;0&amp;0000</summary>
     public static string? InstanceId(string devicePath)
@@ -24,9 +26,58 @@ internal static class DeviceSwitch
     /// <summary>Returns why it failed, or null when the device is off.</summary>
     public static string? TurnOff(string instanceId, string name)
     {
+        if (Disable(instanceId, Native.CmDisablePersist) is { } error)
+            return error;
+        Save(ListPath, Load(ListPath).Where(d => !Same(d, instanceId)).Append(new(instanceId, name)));
+        return null;
+    }
+
+    /// <summary>Returns why it failed, or null when the device is on again.</summary>
+    public static string? TurnOn(string instanceId)
+    {
+        var result = Enable(instanceId);
+        if (result == Native.CrNoSuchDevnode)
+            return "The device isn't plugged in. Plug it in, then turn it back on.";
+        if (result != Native.CrSuccess)
+            return Explain(result);
+
+        Save(ListPath, Load(ListPath).Where(d => !Same(d, instanceId)));
+        return null;
+    }
+
+    /// <summary>Turns an away-group device off until it is turned back on or Windows restarts. Returns why it failed, or null.</summary>
+    public static string? AwayOff(string instanceId, string name)
+    {
+        if (Disable(instanceId, 0) is { } error)
+            return error;
+        Save(AwayPath, Load(AwayPath).Where(d => !Same(d, instanceId)).Append(new(instanceId, name)));
+        return null;
+    }
+
+    /// <summary>
+    /// Turns an away-group device back on. Returns why it failed, or null when it is on, or isn't plugged in: a device
+    /// turned off only until the next restart doesn't stay off once it is unplugged.
+    /// </summary>
+    public static string? AwayOn(string instanceId)
+    {
+        var result = Enable(instanceId);
+        if (result is not (Native.CrSuccess or Native.CrNoSuchDevnode))
+            return Explain(result);
+        Save(AwayPath, Load(AwayPath).Where(d => !Same(d, instanceId)));
+        return null;
+    }
+
+    /// <summary>Away-group devices that are off.</summary>
+    public static List<TurnedOffDevice> AwayOffList() => Load(AwayPath);
+
+    /// <summary>Plugged in and known to Windows right now.</summary>
+    public static bool IsPresent(string instanceId) => Native.CM_Locate_DevNode(out _, instanceId, 0) == Native.CrSuccess;
+
+    static string? Disable(string instanceId, uint flags)
+    {
         var result = Native.CM_Locate_DevNode(out var node, instanceId, 0);
         if (result == Native.CrSuccess)
-            result = Native.CM_Disable_DevNode(node, Native.CmDisablePersist);
+            result = Native.CM_Disable_DevNode(node, flags);
         if (result == Native.CrRemoveVetoed)
         {
             // Disabling doesn't say who refused; a removal request does. It is refused by the same holder, so it
@@ -36,30 +87,18 @@ internal static class DeviceSwitch
             if (result == Native.CrRemoveVetoed)
                 return Vetoed(vetoType, holder.ToString(), instanceId);
             if (result == Native.CrSuccess)
-                result = Native.CM_Disable_DevNode(node, Native.CmDisablePersist);
+                result = Native.CM_Disable_DevNode(node, flags);
         }
-        if (result != Native.CrSuccess)
-            return Explain(result);
-
-        var list = Load().Where(d => !d.InstanceId.Equals(instanceId, StringComparison.OrdinalIgnoreCase)).Append(new(instanceId, name));
-        Save(list);
-        return null;
+        return result == Native.CrSuccess ? null : Explain(result);
     }
 
-    /// <summary>Returns why it failed, or null when the device is on again.</summary>
-    public static string? TurnOn(string instanceId)
+    static uint Enable(string instanceId)
     {
         var result = Native.CM_Locate_DevNode(out var node, instanceId, 0);
-        if (result == Native.CrNoSuchDevnode)
-            return "The device isn't plugged in. Plug it in, then turn it back on.";
-        if (result == Native.CrSuccess)
-            result = Native.CM_Enable_DevNode(node, 0);
-        if (result != Native.CrSuccess)
-            return Explain(result);
-
-        Save(Load().Where(d => !d.InstanceId.Equals(instanceId, StringComparison.OrdinalIgnoreCase)));
-        return null;
+        return result == Native.CrSuccess ? Native.CM_Enable_DevNode(node, 0) : result;
     }
+
+    static bool Same(TurnedOffDevice device, string instanceId) => device.InstanceId.Equals(instanceId, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Devices this app turned off that are still off. One turned back on in Device Manager drops off the list; one
@@ -67,9 +106,9 @@ internal static class DeviceSwitch
     /// </summary>
     public static List<TurnedOffDevice> TurnedOff()
     {
-        var all = Load();
+        var all = Load(ListPath);
         var off = all.Where(d => IsOff(d.InstanceId) != false).ToList();
-        if (off.Count != all.Count) Save(off);
+        if (off.Count != all.Count) Save(ListPath, off);
         return off;
     }
 
@@ -108,12 +147,12 @@ internal static class DeviceSwitch
         _ => $"Windows refused (configuration manager error 0x{result:X2}).",
     };
 
-    static List<TurnedOffDevice> Load()
+    static List<TurnedOffDevice> Load(string path)
     {
         try
         {
-            return File.Exists(ListPath)
-                ? File.ReadAllLines(ListPath).Select(l => l.Split('\t', 2)).Where(p => p.Length == 2).Select(p => new TurnedOffDevice(p[0], p[1])).ToList()
+            return File.Exists(path)
+                ? File.ReadAllLines(path).Select(l => l.Split('\t', 2)).Where(p => p.Length == 2).Select(p => new TurnedOffDevice(p[0], p[1])).ToList()
                 : [];
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -122,12 +161,12 @@ internal static class DeviceSwitch
         }
     }
 
-    static void Save(IEnumerable<TurnedOffDevice> devices)
+    static void Save(string path, IEnumerable<TurnedOffDevice> devices)
     {
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(ListPath)!);
-            File.WriteAllLines(ListPath, devices.Select(d => $"{d.InstanceId}\t{d.Name}"));
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllLines(path, devices.Select(d => $"{d.InstanceId}\t{d.Name}"));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* the device is still off; only the reminder is lost */ }
     }

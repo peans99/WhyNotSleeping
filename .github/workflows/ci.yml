@@ -34,6 +34,20 @@ jobs:
       - name: Build
         run: dotnet build WhyNotSleeping.slnx -c Release --no-restore -warnaserror
 
+      # The parts that decide things - powercfg parsing, the verdicts, what
+      # counts as noise from a controller, when the away group acts, what is
+      # written to disk - checked without the machine they usually read.
+      - name: Test
+        run: dotnet test WhyNotSleeping.slnx -c Release --no-build --logger "trx;LogFileName=results.trx" --results-directory artifacts/test
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results
+          path: artifacts/test
+          if-no-files-found: ignore
+
       # Publishing is where trimming happens, and a trimmed-away P/Invoke or
       # marshalled struct only fails at run time. So publish exactly what a
       # release ships and run the console tool once: a snapshot that prints
@@ -52,6 +66,12 @@ jobs:
           foreach ($section in 'Power plan', "WHY IT'S NOT SLEEPING", "WHY THE SCREEN ISN'T TURNING OFF", 'INPUT DEVICES') {
             if (-not $output.Contains($section)) { throw "snapshot is missing '$section'" }
           }
+
+      # The same scan the release runs, so a false positive on the
+      # executables shows up on the pull request instead of on release day.
+      - name: Scan with Microsoft Defender
+        shell: pwsh
+        run: ./scan.ps1
 
       - uses: actions/upload-artifact@v7
         with:

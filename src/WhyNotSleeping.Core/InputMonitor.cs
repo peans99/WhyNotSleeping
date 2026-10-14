@@ -24,7 +24,10 @@ internal sealed record InputSource(long Id, InputKind Kind, string Name, DateTim
     public string? WhatItSends => Busiest?.Describe() ?? LastChange;
 
     /// <summary>"Joystick - HOTAS Warthog", without the "(VID 044F PID 0402)".</summary>
-    public string ShortName => Name.EndsWith(')') && Name.LastIndexOf(" (VID ", StringComparison.Ordinal) is var i and > 0 ? Name[..i] : Name;
+    public string ShortName => Short(Name);
+
+    public static string Short(string name) =>
+        name.EndsWith(')') && name.LastIndexOf(" (VID ", StringComparison.Ordinal) is var i and > 0 ? name[..i] : name;
 }
 
 /// <summary>
@@ -40,7 +43,10 @@ internal sealed record ControlStatus(string Name, bool IsAxis, long? Value, long
     /// Lots of changes within a sliver of the range: nobody moves a stick that finely, a noisy sensor does. Only for
     /// analog axes; a hat switch or a 3-bit dial has no sliver to wander in.
     /// </summary>
-    public bool Jitter => IsAxis && LogicalMax - LogicalMin >= 64 && Changes >= 10 && Max - Min <= Math.Max(2, (LogicalMax - LogicalMin) / 25);
+    public bool Jitter => IsAxis && LogicalMax - LogicalMin >= 64 && Changes >= 10 && Max - Min <= JitterBand(LogicalMin, LogicalMax);
+
+    /// <summary>How far a noisy sensor wanders on an axis: a sliver of its range, at least 2 counts.</summary>
+    public static long JitterBand(long logicalMin, long logicalMax) => Math.Max(2, (logicalMax - logicalMin) / 25);
 
     /// <summary>"33978", "pressed", or for an 8-way hat "up-left" / "centered" (out of range means centered).</summary>
     public string DisplayValue =>
@@ -106,6 +112,8 @@ internal static partial class InputMonitor
         public HidDecoder? Decoder; // HID only
         public string? LastChange;
         public readonly Dictionary<string, ControlHistory> Controls = new();
+        public DateTime? LastDeliberate; // a button pressed or an axis really moved, not noise
+        public string? DeliberateChange;
     }
 
     /// <summary>A control's values over the last minute. Capped, since a jittery axis can report a thousand times a second.</summary>
@@ -116,6 +124,8 @@ internal static partial class InputMonitor
         public readonly Queue<(DateTime Time, long Value)> Recent = new();
         /// <summary>The seconds of the last minute in which it changed, which the capped Recent can't tell for a fast device.</summary>
         public readonly Queue<long> Seconds = new();
+        /// <summary>Where the axis last came to after a real move; noise wanders around it.</summary>
+        public long? Rest;
         long _lastSecond;
 
         public void Add(DateTime now, long value)
@@ -140,10 +150,44 @@ internal static partial class InputMonitor
     static readonly Dictionary<IntPtr, Device> Devices = new();
     static readonly ConcurrentQueue<InputResumed> Pending = new();
     static DateTime _lastReset;
-    static DateTime _lastHumanInput; // last keyboard or mouse input
+    static DateTime _lastHumanInput; // last keyboard, mouse, touch or pen input
+    static (DateTime Time, string Device, string What)? _lastDeliberate; // last real use of any controller
     static uint _lastResetTick;
 
     public static bool Available { get; private set; }
+
+    /// <summary>
+    /// The last time someone used a keyboard, mouse, touchpad, touch screen or pen. Injected input (remote desktop,
+    /// jiggler apps) doesn't count.
+    /// </summary>
+    public static DateTime LastHumanInput
+    {
+        get { lock (Sync) return _lastHumanInput; }
+    }
+
+    /// <summary>
+    /// The last time any controller was really used (a button pressed, an axis moved further than noise goes), which
+    /// one and how: someone playing a game with only a gamepad is there too.
+    /// </summary>
+    public static (DateTime Time, string Device, string What)? LastDeliberate
+    {
+        get { lock (Sync) return _lastDeliberate; }
+    }
+
+    /// <summary>
+    /// What a device (by instance ID) did lately: its last input of any kind, and the last time it was really used
+    /// (a button pressed, an axis moved further than noise goes) and how.
+    /// </summary>
+    public static (DateTime? LastInput, DateTime? LastDeliberate, string? Deliberate) Activity(string instanceId)
+    {
+        lock (Sync)
+        {
+            // Turned off and on again, a device comes back with a new handle: look at every one it had.
+            var all = Devices.Values.Where(d => d.Events > 0 && instanceId.Equals(d.InstanceId, StringComparison.OrdinalIgnoreCase)).ToList();
+            var used = all.Where(d => d.LastDeliberate != null).MaxBy(d => d.LastDeliberate);
+            return (all.Count > 0 ? all.Max(d => d.LastInput) : (DateTime?)null, used?.LastDeliberate, used?.DeliberateChange);
+        }
+    }
 
     public static void Start()
     {
@@ -312,7 +356,10 @@ internal static partial class InputMonitor
         lock (Sync)
         {
             if (!Devices.TryGetValue(handle, out var device))
+            {
                 Devices[handle] = device = Identify(handle, type);
+                TakeOver(device);
+            }
 
             if (report != null)
             {
@@ -328,7 +375,8 @@ internal static partial class InputMonitor
 
             device.Events++;
             device.LastInput = now;
-            if (device.Kind is InputKind.Mouse or InputKind.Keyboard) _lastHumanInput = now;
+            if (device.Kind is InputKind.Mouse or InputKind.Keyboard or InputKind.Touchpad or InputKind.Touch or InputKind.Pen)
+                _lastHumanInput = now;
             if (change != null) device.LastChange = change;
 
             // Windows stamps the last-input time with the time of the input that reset it, so the first input whose
@@ -345,6 +393,27 @@ internal static partial class InputMonitor
             if (now - _lastReset >= QuietThreshold)
                 Pending.Enqueue(new InputResumed(now, device.Kind, device.Name, now - _lastReset, device.LastChange));
             _lastReset = now;
+        }
+    }
+
+    /// <summary>
+    /// A device that was turned off and on again, or replugged, comes back with a new handle: it carries on the old
+    /// entry's history instead of being listed twice.
+    /// </summary>
+    static void TakeOver(Device device)
+    {
+        if (device.InstanceId is null) return;
+        foreach (var old in Devices.Values.Where(d => d != device && device.InstanceId.Equals(d.InstanceId, StringComparison.OrdinalIgnoreCase)).ToList())
+        {
+            device.Events += old.Events;
+            device.LastInput = old.LastInput > device.LastInput ? old.LastInput : device.LastInput;
+            device.IdleResets += old.IdleResets;
+            device.LastIdleReset ??= old.LastIdleReset;
+            foreach (var reset in old.RecentResets) device.RecentResets.Enqueue(reset);
+            if (old.LastDeliberate > device.LastDeliberate || device.LastDeliberate is null)
+                (device.LastDeliberate, device.DeliberateChange) = (old.LastDeliberate, old.DeliberateChange);
+            device.LastChange ??= old.LastChange;
+            Devices.Remove(old.Handle);
         }
     }
 
@@ -379,9 +448,33 @@ internal static partial class InputMonitor
                     device.Controls[change.Control] = history = new ControlHistory(change.IsAxis, change.LogicalMin, change.LogicalMax);
                 history.Add(now, change.Value);
                 last = change;
+                if (Deliberate(change, ref history.Rest))
+                {
+                    device.LastDeliberate = now;
+                    device.DeliberateChange = change.ToString();
+                    _lastDeliberate = (now, InputSource.Short(device.Name), device.DeliberateChange);
+                }
             }
         }
         return last?.ToString();
+    }
+
+    /// <summary>
+    /// Whether a change looks like someone using the control rather than a noisy sensor: a button pressed, a hat or
+    /// a few-position switch moved, or an axis moving further from where it rested than jitter wanders. Vendor
+    /// channels never count: games don't read them, so nobody plays with them. <paramref name="rest"/> is where the
+    /// axis last came to after a real move, updated here.
+    /// </summary>
+    internal static bool Deliberate(ControlChange change, ref long? rest)
+    {
+        if (change.Control.StartsWith("vendor channel", StringComparison.Ordinal)) return false;
+        if (!change.IsAxis) return change.Value != 0;
+        if (change.LogicalMax - change.LogicalMin < 64) return true;
+        rest ??= change.Previous ?? change.Value;
+        if (Math.Abs(change.Value - rest.Value) <= ControlStatus.JitterBand(change.LogicalMin, change.LogicalMax))
+            return false;
+        rest = change.Value;
+        return true;
     }
 
     /// <summary>

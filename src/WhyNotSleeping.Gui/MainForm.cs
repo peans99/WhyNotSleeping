@@ -21,9 +21,10 @@ internal sealed class MainForm : Form
     static Color Purple => Theme.Purple;
     static Color Blue => Theme.Blue;
 
+    readonly TrayApp _app;
     readonly bool _isAdmin;
-    readonly SleepMonitor _monitor;
-    TaskCompletionSource _wake = new();
+    readonly Settings _settings;
+    readonly AwayGuard _away;
     long _eventsShown;
 
     readonly Panel _banner;
@@ -39,11 +40,21 @@ internal sealed class MainForm : Form
     readonly Button _unignore;
     readonly ToolStripMenuItem _ignoreItem, _locateItem;
     readonly Label _status;
+    readonly CheckBox _startWithWindows;
+    readonly ItemList _awayList = NewList(("Device", 300), ("Now", 400));
+    readonly CheckBox _awayEnabled, _awaySkipFullScreen;
+    readonly NumericUpDown _awayMinutes;
+    readonly RadioButton[] _awayActions;
+    readonly Label _awayStatus;
+    readonly Button _awayRemove;
+    bool _syncing; // setting the controls from the settings, not the user changing them
 
-    public MainForm(bool isAdmin, string? logPath)
+    public MainForm(TrayApp app, bool isAdmin, string? logPath, Settings settings, AwayGuard away)
     {
+        _app = app;
         _isAdmin = isAdmin;
-        _monitor = new SleepMonitor(5, logPath);
+        _settings = settings;
+        _away = away;
 
         Text = "WhyNotSleeping";
         Font = new Font("Segoe UI", 9.75f);
@@ -62,7 +73,7 @@ internal sealed class MainForm : Form
             AutoSize = true, Anchor = AnchorStyles.Left, ForeColor = Theme.BannerText, Margin = new Padding(0, 6, 12, 6),
         };
         var elevate = new Button { Text = "Restart as administrator", AutoSize = true, Anchor = AnchorStyles.Right, FlatStyle = FlatStyle.System };
-        elevate.Click += (_, _) => RestartElevated();
+        elevate.Click += (_, _) => _app.RestartElevated();
         var bannerLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, AutoSize = true };
         bannerLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         bannerLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -81,12 +92,23 @@ internal sealed class MainForm : Form
             Text = "Why isn't my PC sleeping?", AutoSize = true, Anchor = AnchorStyles.Left,
             Font = new Font("Segoe UI Semibold", 15f), Margin = new Padding(0, 0, 0, 4),
         };
-        var settings = new Button { Text = "Power && sleep settings", AutoSize = true, FlatStyle = FlatStyle.System };
-        settings.Click += (_, _) => Open("ms-settings:powersleep");
+        var powerSettings = new Button { Text = "Power && sleep settings", AutoSize = true, FlatStyle = FlatStyle.System };
+        powerSettings.Click += (_, _) => Open("ms-settings:powersleep");
         var refresh = new Button { Text = "Refresh now", AutoSize = true, FlatStyle = FlatStyle.System };
-        refresh.Click += (_, _) => _wake.TrySetResult();
+        refresh.Click += (_, _) => _app.RefreshNow();
+        _startWithWindows = new CheckBox
+        {
+            Text = "Start with Windows", AutoSize = true, Enabled = isAdmin, ForeColor = TextColor, Margin = new Padding(3, 7, 12, 3),
+        };
+        _startWithWindows.CheckedChanged += (_, _) =>
+        {
+            if (!_syncing && _startWithWindows.Checked != _app.StartsWithWindows) _app.SetStartWithWindows(_startWithWindows.Checked);
+        };
+        new ToolTip().SetToolTip(_startWithWindows, isAdmin
+            ? "Starts WhyNotSleeping in the notification area when you sign in, without the administrator prompt."
+            : "Needs administrator: restart WhyNotSleeping as administrator to change this.");
         var headerButtons = new FlowLayoutPanel { AutoSize = true, Anchor = AnchorStyles.Right, WrapContents = false, Margin = Padding.Empty };
-        headerButtons.Controls.AddRange([settings, refresh]);
+        headerButtons.Controls.AddRange([_startWithWindows, powerSettings, refresh]);
         var header = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, Margin = new Padding(0, 0, 0, 8) };
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -128,8 +150,9 @@ internal sealed class MainForm : Form
         _inputs = NewList(("Device", 100), ("Name", 250), ("Last input", 90), ("Idle resets", 80), ("Last minute", 85), ("What it's sending", 300));
         var turnOff = new ToolStripMenuItem("Turn off this device...", null, (_, _) => TurnOffSelected());
         var turnOn = new ToolStripMenuItem("Turn back on", null, (_, _) => TurnOnSelected());
+        var awayItem = new ToolStripMenuItem("Add to the away group", null, (_, _) => ToggleAwayGroup());
         var inputMenu = new ContextMenuStrip();
-        inputMenu.Items.AddRange([turnOff, turnOn]);
+        inputMenu.Items.AddRange([turnOff, turnOn, new ToolStripSeparator(), awayItem]);
         inputMenu.Opening += (_, e) =>
         {
             var selected = Selected(_inputs);
@@ -143,6 +166,10 @@ internal sealed class MainForm : Form
             turnOn.Visible = selected is TurnedOffDevice;
             turnOn.Enabled = _isAdmin;
             turnOn.Text = "Turn back on" + needsAdmin;
+            awayItem.Visible = CanJoinAwayGroup(selected);
+            awayItem.Text = _settings.InAwayGroup((selected as InputSource)?.InstanceId)
+                ? "Remove from the away group"
+                : "Add to the away group (turn it off when I'm away)...";
         };
         _inputs.ContextMenuStrip = inputMenu;
         _events = NewList(("Time", 150), ("Event", 760));
@@ -173,12 +200,64 @@ internal sealed class MainForm : Form
         }, 0, 1);
         inputSplit.Controls.Add(Cell(_controls), 0, 2);
         var inputsPage = Page("Input devices",
-            "Every device that sent input since this window opened. Only input that resets the idle timer delays sleep and screen-off.", inputSplit);
+            "Every device that sent input since WhyNotSleeping started. Only input that resets the idle timer delays sleep and screen-off.", inputSplit);
         tabs.TabPages.Add(inputsPage);
         Fill(_controls, [], "Select a controller above to see its axes and buttons.");
         // Polled rather than driven by SelectedIndexChanged, which also fires while a refresh rebuilds the list.
         _live.Tick += (_, _) => { if (tabs.SelectedTab == inputsPage) ShowControls(); };
         _live.Start();
+
+        // When I'm away: the away group and when to turn it off
+        _awayEnabled = new CheckBox
+        {
+            Text = "Turn the devices below off when nobody has used the keyboard, mouse or a controller for", AutoSize = true, ForeColor = TextColor,
+            Margin = new Padding(0, 3, 4, 3),
+        };
+        _awayMinutes = new NumericUpDown { Minimum = 1, Maximum = 240, Width = 56, BackColor = Surface, ForeColor = TextColor, Margin = new Padding(0, 1, 4, 0) };
+        var awayWhen = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = true, Margin = Padding.Empty };
+        awayWhen.Controls.AddRange([_awayEnabled, _awayMinutes,
+            new Label { Text = "minutes and all they send is noise.", AutoSize = true, Margin = new Padding(0, 4, 0, 3) }]);
+        _awayActions =
+        [
+            new RadioButton { Text = "Then let Windows turn the screen off and sleep on its usual schedule", Tag = AwayAction.DevicesOnly },
+            new RadioButton { Text = "Then turn the screen off right away", Tag = AwayAction.ScreenOff },
+            new RadioButton { Text = "Then put the PC to sleep right away", Tag = AwayAction.Sleep },
+        ];
+        var awayThen = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, Margin = new Padding(18, 2, 0, 0) };
+        foreach (var radio in _awayActions)
+        {
+            radio.AutoSize = true;
+            radio.ForeColor = TextColor;
+            radio.Margin = new Padding(0, 1, 0, 1);
+            radio.CheckedChanged += (_, _) => { if (radio.Checked) AwaySettingsChanged(); };
+        }
+        awayThen.Controls.AddRange(_awayActions);
+        _awaySkipFullScreen = new CheckBox
+        {
+            Text = "Not while a full-screen game, video or presentation is running", AutoSize = true, ForeColor = TextColor,
+            Margin = new Padding(0, 6, 0, 2),
+        };
+        _awayStatus = new Label { AutoSize = true, Anchor = AnchorStyles.Left | AnchorStyles.Right, Font = new Font("Segoe UI Semibold", 9.75f), Margin = new Padding(0, 8, 0, 8) };
+        _awayEnabled.CheckedChanged += (_, _) => AwaySettingsChanged();
+        _awayMinutes.ValueChanged += (_, _) => AwaySettingsChanged();
+        _awaySkipFullScreen.CheckedChanged += (_, _) => AwaySettingsChanged();
+        _awayRemove = new Button { Text = "Remove from the group", AutoSize = true, Enabled = false, FlatStyle = FlatStyle.System };
+        _awayRemove.Click += (_, _) => { if (Selected(_awayList) is TurnedOffDevice d) RemoveFromAwayGroup(d.InstanceId); };
+        _awayList.SelectedIndexChanged += (_, _) => _awayRemove.Enabled = Selected(_awayList) is TurnedOffDevice;
+        var awayLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Margin = Padding.Empty };
+        awayLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        for (var i = 0; i < 4; i++) awayLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        awayLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        awayLayout.Controls.Add(awayWhen, 0, 0);
+        awayLayout.Controls.Add(awayThen, 0, 1);
+        awayLayout.Controls.Add(_awaySkipFullScreen, 0, 2);
+        awayLayout.Controls.Add(_awayStatus, 0, 3);
+        awayLayout.Controls.Add(Cell(_awayList), 0, 4);
+        tabs.TabPages.Add(Page("When I'm away",
+            "Devices that keep the PC awake when nobody is using them, like a joystick with a noisy sensor. Add one from Input devices (right-click it). " +
+            "They come back on as soon as you move the mouse, press a key, use a controller or unlock the PC, and after a restart.", awayLayout, _awayRemove));
+        SyncAwaySettings();
+
         tabs.TabPages.Add(Page("Event log",
             logPath is null ? "What changed, newest first." : $"What changed, newest first. Also saved to {logPath}", _events, openLog, openFolder));
         tabs.TabPages.Add(Page("Ignored apps",
@@ -187,6 +266,7 @@ internal sealed class MainForm : Form
         _status = new Label { AutoSize = true, ForeColor = Muted, Margin = new Padding(0, 6, 0, 0), Text = "Starting..." };
 
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(14, 12, 14, 8) };
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); // the window's width, so long lines wrap instead of widening it
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 168));
@@ -202,51 +282,79 @@ internal sealed class MainForm : Form
         Controls.Add(root);
     }
 
-    protected override async void OnShown(EventArgs e)
+    protected override void OnHandleCreated(EventArgs e)
     {
-        base.OnShown(e);
-        _monitor.Start(_isAdmin);
-        while (!IsDisposed)
+        base.OnHandleCreated(e);
+        // A second copy asks this one to show itself; let that through even when this one is elevated and it isn't.
+        Native.ChangeWindowMessageFilterEx(Handle, SingleInstance.ShowMessage, Native.MsgfltAllow, IntPtr.Zero);
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == SingleInstance.ShowMessage && SingleInstance.ShowMessage != 0)
+            _app.ShowWindow();
+        base.WndProc(ref m);
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        // Closing the window hides it; monitoring and the away group go on. Exit is in the tray menu. (None: a plain
+        // WM_CLOSE from another program, which is still someone closing the window.)
+        if (e.CloseReason is CloseReason.UserClosing or CloseReason.None && !_app.Exiting)
         {
-            try
-            {
-                var report = await Task.Run(_monitor.Tick);
-                if (IsDisposed) return;
-                Display(report);
-            }
-            catch (Exception ex)
-            {
-                _status.Text = $"Refresh failed: {ex.Message}";
-            }
-            _wake = new TaskCompletionSource();
-            await Task.WhenAny(Task.Delay(TimeSpan.FromSeconds(_monitor.IntervalSeconds)), _wake.Task);
+            e.Cancel = true;
+            Hide();
+            _app.Hidden();
+        }
+        base.OnFormClosing(e);
+    }
+
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        base.OnVisibleChanged(e);
+        // Nothing is drawn while hidden; catch up on showing.
+        if (Visible)
+        {
+            _live.Start();
+            ShowStartup();
+            ShowAway();
+            _app.RefreshNow();
+        }
+        else
+        {
+            _live.Stop();
         }
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
         _live.Stop();
-        _monitor.Stop();
         base.OnFormClosed(e);
     }
 
-    void Display(Report r)
+    internal static string SleepHeadline(Report r) => r.Sleep.Max(f => f.Severity) switch
+    {
+        Severity.Problem => "Your PC is being kept awake",
+        Severity.Warning or Severity.Unknown => "Something may be keeping your PC awake",
+        _ => "Nothing is blocking sleep",
+    };
+
+    internal static string ScreenHeadline(Report r) => r.Display == DisplayState.Off ? "The screen is off" : r.Screen.Max(f => f.Severity) switch
+    {
+        Severity.Problem => "Something is keeping the screen on",
+        Severity.Warning or Severity.Unknown => "Something may be keeping the screen on",
+        _ => "Nothing is keeping the screen on",
+    };
+
+    internal void ShowError(string message) => _status.Text = $"Refresh failed: {message}";
+
+    internal void Display(Report r)
     {
         var s = r.Snapshot;
         var p = s.Power;
 
-        _sleepCard.SetFindings(r.Sleep, worst => worst switch
-        {
-            Severity.Problem => "Your PC is being kept awake",
-            Severity.Warning or Severity.Unknown => "Something may be keeping your PC awake",
-            _ => "Nothing is blocking sleep",
-        });
-        _screenCard.SetFindings(r.Screen, worst => r.Display == DisplayState.Off ? "The screen is off" : worst switch
-        {
-            Severity.Problem => "Something is keeping the screen on",
-            Severity.Warning or Severity.Unknown => "Something may be keeping the screen on",
-            _ => "Nothing is keeping the screen on",
-        });
+        _sleepCard.SetFindings(r.Sleep, SleepHeadline(r));
+        _screenCard.SetFindings(r.Screen, ScreenHeadline(r));
 
         _plan.Set(p.SchemeName);
         _source.Set((p.OnAC ? "Plugged in" : "Battery") + (p.BatteryPercent is { } b ? $" ({b}%)" : ""));
@@ -261,8 +369,104 @@ internal sealed class MainForm : Form
         ShowOverrides(s);
 
         _banner.Visible = s.Requests == null;
-        _status.Text = $"Updated {s.Time:HH:mm:ss}, refreshes every {_monitor.IntervalSeconds} s. " +
-                       $"Idle time: {r.LastInputDescription}. Closing this window stops the monitoring.";
+        _status.Text = $"Updated {s.Time:HH:mm:ss}, refreshes every {_app.IntervalSeconds} s. " +
+                       $"Idle time: {r.LastInputDescription}. Closing this window keeps it running in the notification area.";
+    }
+
+    internal void ShowStartup()
+    {
+        _syncing = true;
+        _startWithWindows.Checked = _app.StartsWithWindows;
+        _syncing = false;
+    }
+
+    /// <summary>The away group's status line and its devices, refreshed every second while the window is open.</summary>
+    internal void ShowAway()
+    {
+        _awayStatus.Text = _away.Status;
+        _awayStatus.ForeColor = _away.IsAway ? Blue : _settings.AwayEnabled ? TextColor : Muted;
+        var now = DateTime.Now;
+        var rows = _settings.AwayDevices.Select(d => new ListViewItem([d.Name, _away.Describe(d, now)])
+        {
+            Tag = d,
+            ToolTipText = d.InstanceId,
+            ForeColor = _away.IsOff(d.InstanceId) ? Blue : TextColor,
+        }).ToList();
+        // Update in place when it's the same devices, so the selection and tooltips hold still.
+        if (_awayList.Items.Count == rows.Count && rows.Count > 0 &&
+            rows.Select((r, i) => (r, i)).All(x => _awayList.Items[x.i].Tag == x.r.Tag))
+        {
+            for (var i = 0; i < rows.Count; i++)
+            {
+                var item = _awayList.Items[i];
+                if (item.SubItems[1].Text != rows[i].SubItems[1].Text) item.SubItems[1].Text = rows[i].SubItems[1].Text;
+                item.ForeColor = rows[i].ForeColor;
+            }
+            return;
+        }
+        Fill(_awayList, rows, "The away group is empty.");
+        _awayRemove.Enabled = Selected(_awayList) is TurnedOffDevice;
+    }
+
+    void SyncAwaySettings()
+    {
+        _syncing = true;
+        _awayEnabled.Checked = _settings.AwayEnabled;
+        _awayMinutes.Value = Math.Clamp(_settings.AwayMinutes, (int)_awayMinutes.Minimum, (int)_awayMinutes.Maximum);
+        foreach (var radio in _awayActions)
+            radio.Checked = (AwayAction)radio.Tag! == _settings.AwayAction;
+        _awaySkipFullScreen.Checked = _settings.AwaySkipFullScreen;
+        _syncing = false;
+    }
+
+    void AwaySettingsChanged()
+    {
+        if (_syncing) return;
+        _settings.AwayEnabled = _awayEnabled.Checked;
+        _settings.AwayMinutes = (int)_awayMinutes.Value;
+        _settings.AwayAction = _awayActions.FirstOrDefault(r => r.Checked)?.Tag as AwayAction? ?? AwayAction.ScreenOff;
+        _settings.AwaySkipFullScreen = _awaySkipFullScreen.Checked;
+        _settings.Save();
+    }
+
+    /// <summary>Same devices as turning off: a mouse or keyboard in the group would leave nothing to come back with.</summary>
+    static bool CanJoinAwayGroup(object? selected) =>
+        selected is InputSource { InstanceId: not null, Kind: not (InputKind.Mouse or InputKind.Keyboard or InputKind.Software) };
+
+    void ToggleAwayGroup()
+    {
+        if (Selected(_inputs) is not InputSource { InstanceId: { } id } device || !CanJoinAwayGroup(device)) return;
+        if (_settings.InAwayGroup(id))
+        {
+            RemoveFromAwayGroup(id);
+            return;
+        }
+        var first = !_settings.AwayEnabled;
+        if (first)
+        {
+            var answer = MessageBox.Show(this,
+                $"When nobody has used the keyboard, mouse or a controller for {_settings.AwayMinutes} minutes and \"{device.ShortName}\" is only sending noise, " +
+                "WhyNotSleeping will turn it off, like Disable in Device Manager, so the screen can turn off and the PC can sleep.\n\n" +
+                "It comes back on as soon as you move the mouse, press a key, use a controller or unlock the PC, and after a restart. " +
+                "Playing with it, or with any other controller, keeps it on.\n\n" +
+                "Add it to the away group and turn this on? You can change the time and what happens next in the \"When I'm away\" tab.",
+                "Away group", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (answer != DialogResult.Yes) return;
+            _settings.AwayEnabled = true;
+        }
+        _settings.AwayDevices.Add(new TurnedOffDevice(id, device.ShortName));
+        _settings.Save();
+        SyncAwaySettings();
+        ShowAway();
+        _app.RefreshNow();
+    }
+
+    void RemoveFromAwayGroup(string instanceId)
+    {
+        _settings.AwayDevices.RemoveAll(d => d.InstanceId.Equals(instanceId, StringComparison.OrdinalIgnoreCase));
+        _settings.Save();
+        ShowAway();
+        _app.RefreshNow();
     }
 
     void ShowRequests(Report r)
@@ -286,13 +490,16 @@ internal sealed class MainForm : Form
         // A device turned off here is listed as off, even after a restart, so it can always be turned back on.
         var off = s.TurnedOff.Select(d => d.InstanceId).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var active = s.Inputs.Where(i => i.InstanceId is null || !off.Contains(i.InstanceId)).Select(i => new ListViewItem([
-            InputMonitor.Label(i.Kind), i.ShortName, Format.Duration(s.Time - i.LastInput) + " ago",
+            _away.IsOff(i.InstanceId) ? "off (away)" : InputMonitor.Label(i.Kind),
+            i.ShortName + (_settings.InAwayGroup(i.InstanceId) ? " (away group)" : ""),
+            Format.Duration(s.Time - i.LastInput) + " ago",
             i.IdleResets.ToString("N0"), i.ResetsLastMinute.ToString("N0"), i.WhatItSends ?? ""])
         {
             Tag = i,
-            ToolTipText = (i.Suspicious ? "This device keeps resetting the idle timer. If nobody is using it, right-click it to turn it off.\n" : "") +
+            ToolTipText = (i.Suspicious ? "This device keeps resetting the idle timer. If nobody is using it, right-click it to turn it off, " +
+                                          "or to add it to the away group.\n" : "") +
                           i.Name + (i.WhatItSends is { } what ? "\n" + what : ""),
-            ForeColor = i.Suspicious ? Red : i.IdleResets == 0 ? Muted : ForeColor,
+            ForeColor = _away.IsOff(i.InstanceId) ? Muted : i.Suspicious ? Red : i.IdleResets == 0 ? Muted : ForeColor,
         });
         var turnedOff = s.TurnedOff.Select(d => new ListViewItem(["turned off", d.Name, "", "", "", "Turned off by WhyNotSleeping. Right-click to turn it back on."])
         {
@@ -330,7 +537,7 @@ internal sealed class MainForm : Form
     {
         if (error != null)
             MessageBox.Show(this, error, "WhyNotSleeping", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        _wake.TrySetResult();
+        _app.RefreshNow();
     }
 
     /// <summary>
@@ -449,19 +656,13 @@ internal sealed class MainForm : Form
     {
         if (error != null)
             MessageBox.Show(this, error, "powercfg", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        _wake.TrySetResult();
+        _app.RefreshNow();
     }
 
     void LocateSelected()
     {
         if (Selected(_requests) is PowerRequest request && File.Exists(request.Name))
             Process.Start("explorer.exe", $"/select,\"{request.Name}\"");
-    }
-
-    void RestartElevated()
-    {
-        if (Elevation.TryRelaunch("--no-elevate"))
-            Close();
     }
 
     static void Open(string target)
@@ -534,9 +735,10 @@ internal sealed class MainForm : Form
     static TabPage Page(string title, string description, Control content, params Button[] buttons)
     {
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(8) };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); // so long descriptions wrap
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        layout.Controls.Add(new Label { Text = description, AutoSize = true, ForeColor = Muted, Margin = new Padding(0, 0, 0, 6) }, 0, 0);
+        layout.Controls.Add(new Label { Text = description, AutoSize = true, Anchor = AnchorStyles.Left | AnchorStyles.Right, ForeColor = Muted, Margin = new Padding(0, 0, 0, 6) }, 0, 0);
         layout.Controls.Add(content is ItemList list ? Cell(list) : content, 0, 1);
         if (buttons.Length > 0)
         {
@@ -599,7 +801,7 @@ internal sealed class MainForm : Form
             Controls.Add(_stripe);
         }
 
-        public void SetFindings(List<Finding> findings, Func<Severity, string> headline)
+        public void SetFindings(List<Finding> findings, string headline)
         {
             var worst = findings.Max(f => f.Severity);
             var accent = worst switch
@@ -612,7 +814,7 @@ internal sealed class MainForm : Form
             BackColor = Palette.Blend(Surface, accent, 0.06); // a hint of the verdict, not a wash of it
             _details.BackColor = BackColor;
             _headline.ForeColor = accent;
-            _headline.Text = headline(worst);
+            _headline.Text = headline;
             var details = string.Join("\n", findings.Select(f => "• " + f.Text));
             if (_details.Text != details) _details.Text = details; // setting it scrolls back to the top
         }
