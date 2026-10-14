@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/badge/.NET-10-512BD4" alt=".NET 10">
   <img src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D6" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/licence-Apache--2.0-blue" alt="Licence Apache 2.0">
-  <img src="https://img.shields.io/badge/tests-69%20passing-4fd48a" alt="69 tests">
+  <img src="https://img.shields.io/badge/tests-90%20passing-4fd48a" alt="90 tests">
   <img src="https://img.shields.io/badge/scanned-Microsoft%20Defender-46617a" alt="Scanned with Microsoft Defender">
 </p>
 
@@ -135,6 +135,14 @@ CI builds with warnings as errors, runs the tests, publishes both executables ex
 The release workflow refuses a tag that disagrees with `Directory.Build.props`. It builds both executables, smoke-tests the console tool, scans the files with Microsoft Defender, and publishes them with that version's notes.
 
 ## Release notes
+
+### 1.1.1
+
+- Exiting or unlocking while the away group is turning devices off now waits for the operation and turns them back on. Input, a newly opened full-screen app, or changes to the group during that operation cancel the screen-off or sleep action.
+- Devices that could not be turned back on are retried when you next use the keyboard, mouse or a controller. Disabling the away group or removing a device also restores devices it turned off.
+- Devices turned off by the current run are restored even if their reminder could not be saved to disk.
+- Signing out or shutting down while the away group is turning devices off waits for that, then turns them back on before Windows ends the app.
+- Invalid saved away settings no longer crash the window or let the away timer use a delay outside the displayed 1–240 minute range.
 
 ### 1.1.0
 

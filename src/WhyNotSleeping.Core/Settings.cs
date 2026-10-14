@@ -35,11 +35,22 @@ internal sealed class Settings
     {
         try
         {
-            if (File.Exists(FilePath) && JsonSerializer.Deserialize(File.ReadAllText(FilePath), SettingsJson.Default.Settings) is { } settings)
-                return settings;
+            if (File.Exists(FilePath)) return Parse(File.ReadAllText(FilePath));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException) { /* start from the defaults */ }
         return new Settings();
+    }
+
+    /// <summary>Validate saved values before either the window or the away guard reads them.</summary>
+    internal static Settings Parse(string json)
+    {
+        var settings = JsonSerializer.Deserialize(json, SettingsJson.Default.Settings) ?? new Settings();
+        settings.AwayMinutes = Math.Clamp(settings.AwayMinutes, 1, 240);
+        if (!Enum.IsDefined(settings.AwayAction)) settings.AwayAction = AwayAction.ScreenOff;
+        settings.AwayDevices = (settings.AwayDevices ?? [])
+            .Where(d => d != null && !string.IsNullOrWhiteSpace(d.InstanceId) && !string.IsNullOrWhiteSpace(d.Name))
+            .DistinctBy(d => d.InstanceId, StringComparer.OrdinalIgnoreCase).ToList();
+        return settings;
     }
 
     public void Save()

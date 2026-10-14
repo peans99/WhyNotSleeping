@@ -26,9 +26,13 @@ internal sealed class TrayApp : ApplicationContext
         _away = new AwayGuard(_settings, isAdmin, _monitor.Log);
         _form = new MainForm(this, isAdmin, logPath, _settings, _away);
         _ = _form.Handle; // so it can be updated, and found by a second copy, while hidden
-        _form.FormClosed += (_, _) => // Windows shutting down or signing out, or Exit
+        _form.FormClosed += (_, e) => // Windows shutting down or signing out, or Exit
         {
             _formClosed = true;
+            // Windows may end the process as soon as this returns, before an awaited restore gets to run, and a
+            // device turned off "until restart" stays off through a sign-out or Fast Startup. So restore now.
+            if (e.CloseReason is CloseReason.WindowsShutDown or CloseReason.TaskManagerClosing)
+                _away.StopNow("Windows is signing out or shutting down");
             Exit();
         };
 
@@ -62,7 +66,7 @@ internal sealed class TrayApp : ApplicationContext
                     ? new AwayGroup(_settings.AwayDevices.Select(d => d.InstanceId).ToHashSet(StringComparer.OrdinalIgnoreCase), _settings.AwayMinutes)
                     : null;
                 await _away.TickAsync();
-                if (_form.Visible) _form.ShowAway();
+                if (!_exiting && _form.Visible) _form.ShowAway();
             }
             catch (Exception ex)
             {
@@ -86,6 +90,7 @@ internal sealed class TrayApp : ApplicationContext
     {
         _monitor.Start(_isAdmin);
         await _away.RestoreLeftoversAsync();
+        if (_exiting) return;
         _awayTimer.Start();
         while (!_exiting)
         {
@@ -98,7 +103,7 @@ internal sealed class TrayApp : ApplicationContext
             }
             catch (Exception ex)
             {
-                _form.ShowError(ex.Message);
+                if (!_exiting) _form.ShowError(ex.Message);
             }
             _wake = new TaskCompletionSource();
             await Task.WhenAny(Task.Delay(TimeSpan.FromSeconds(_monitor.IntervalSeconds)), _wake.Task);
@@ -177,13 +182,13 @@ internal sealed class TrayApp : ApplicationContext
 
     public bool Exiting => _exiting;
 
-    public void Exit()
+    public async void Exit()
     {
         if (_exiting) return;
         _exiting = true;
         _awayTimer.Stop();
         SystemEvents.SessionSwitch -= OnSessionSwitch;
-        _away.ComeBack("WhyNotSleeping exited");
+        await _away.StopAsync();
         _monitor.Stop();
         _tray.Visible = false;
         _tray.Dispose();
