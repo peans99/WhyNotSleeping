@@ -44,5 +44,20 @@ public class AtomicFileTests : IDisposable
         Assert.Single(Directory.GetFiles(_folder));
     }
 
+    [Fact]
+    public void The_away_record_survives_a_round_trip_and_keeps_its_old_list_when_replacing_fails()
+    {
+        var path = PathFor("away-devices.txt");
+        TurnedOffDevice[] stick = [new(@"HID\VID_044F&PID_0402\c&3738ddd0&0&0000", "Joystick - HOTAS Warthog")];
+        DeviceSwitch.Save(path, stick);
+        Assert.Equal(stick, DeviceSwitch.Load(path));
+
+        // The next start reads this to turn the stick back on: a failed write mustn't empty it.
+        using (File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            DeviceSwitch.Save(path, []);
+        Assert.Equal(stick, DeviceSwitch.Load(path));
+        Assert.Single(Directory.GetFiles(_folder));
+    }
+
     public void Dispose() { if (Directory.Exists(_folder)) Directory.Delete(_folder, recursive: true); }
 }

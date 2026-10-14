@@ -130,4 +130,21 @@ public class DiagnosisTests
         var change = new DisplayChange(Now, DisplayState.Off, TimeSpan.FromSeconds(605));
         Assert.Equal("* display off after 10m 5s idle (timeout 10m 0s)", Diagnosis.DescribeDisplayChange(change, Power()));
     }
+
+    [Fact]
+    public void A_powercfg_failure_says_so_instead_of_asking_for_administrator()
+    {
+        string? error = null;
+        var requests = Snapshot.Try<List<PowerRequest>?>(() => throw new TimeoutException("powercfg.exe didn't finish within 10s."), null, ref error);
+        var overrides = Snapshot.Try<List<RequestOverride>>(() => throw new InvalidOperationException("second"), [], ref error);
+        Assert.Null(requests);
+        Assert.Empty(overrides);
+        Assert.Equal("powercfg.exe didn't finish within 10s.", error); // the first failure
+
+        var power = Power() with { ExecutionState = 0x1 };
+        var s = new Snapshot(Now, power, requests, overrides, [], []) { PowerCfgError = error };
+        var sleep = Diagnosis.Sleep(s, []);
+        Assert.Contains(sleep, f => f.Severity == Severity.Unknown && f.Text.Contains("didn't finish"));
+        Assert.DoesNotContain(sleep, f => f.Text.Contains("administrator") || f.Text.Contains("run as admin"));
+    }
 }

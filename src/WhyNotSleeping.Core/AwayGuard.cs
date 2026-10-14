@@ -23,6 +23,12 @@ internal sealed class AwayGuard(Settings settings, bool isAdmin, Action<string> 
         public Func<string, string?> On { get; init; } = DeviceSwitch.AwayOn;
     }
 
+    /// <summary>
+    /// After devices couldn't be turned back on, how long until input retries: whatever holds them rarely lets go
+    /// sooner, and every try is logged. The tray item retries at once.
+    /// </summary>
+    internal static readonly TimeSpan RetryEvery = TimeSpan.FromSeconds(30);
+
     readonly Services _services = services ?? new();
     /// <summary>Input before this doesn't count: the start, or when the devices last came back on.</summary>
     DateTime _watchFrom = services?.Now() ?? DateTime.Now;
@@ -97,17 +103,32 @@ internal sealed class AwayGuard(Settings settings, bool isAdmin, Action<string> 
         var human = _services.Human();
         var controller = _services.Controller();
         var present = controller is { } c && c.Time > human ? c.Time : human;
+        if (_pauseUntil is { } until && now >= until)
+        {
+            // Like Resume: the countdown starts now, not when the pause began, or it would act the moment it ends.
+            _pauseUntil = null;
+            _watchFrom = now;
+            log("* away: the pause ended");
+        }
         if (IsAway)
         {
             var since = _awaySince ?? _watchFrom;
-            if (present > since || PauseReason != null || !settings.AwayEnabled || _off.Any(id => !settings.InAwayGroup(id)))
-                await RestoreAsync(controller is { } used && used.Time > since && used.Time >= human
-                    ? $"{used.Device} was used: {used.What}"
-                    : present > since ? "the keyboard or mouse was used" : "the away group was changed");
+            var used = controller is { } u && u.Time > since && u.Time >= human ? $"{u.Device} was used: {u.What}" : "the keyboard or mouse was used";
+            if (_awaySince == null)
+            {
+                // Turning them back on failed (_watchFrom is when): retry on later input, but not every second.
+                if (present > since && now - since >= RetryEvery)
+                    await RestoreAsync(used);
+                else
+                    Status = "Some devices couldn't be turned back on: see the event log. Use the tray menu to retry.";
+            }
+            else if (present > since)
+                await RestoreAsync(used);
+            else if (PauseReason != null || !settings.AwayEnabled || _off.Any(id => !settings.InAwayGroup(id)))
+                await RestoreAsync(PauseReason != null ? "the away group was paused"
+                    : !settings.AwayEnabled ? "the away group was turned off" : "the away group was changed");
             else
-                Status = _awaySince != null
-                    ? $"Turned off at {since:HH:mm}. Move the mouse, press a key or use a controller to turn {(_off.Count == 1 ? "it" : "them")} back on."
-                    : "Some devices couldn't be turned back on: see the event log. Use the tray menu to retry.";
+                Status = $"Turned off at {since:HH:mm}. Move the mouse, press a key or use a controller to turn {(_off.Count == 1 ? "it" : "them")} back on.";
             return;
         }
         if (PauseReason is { } pause)

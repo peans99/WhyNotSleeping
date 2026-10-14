@@ -120,7 +120,7 @@ public class AwayLifecycleTests
     }
 
     [Fact]
-    public async Task Pause_restores_devices_and_automatically_expires()
+    public async Task Pause_restores_devices_and_expires_into_a_new_countdown()
     {
         var f = new Fixture();
         await f.Guard.TickAsync();
@@ -130,9 +130,14 @@ public class AwayLifecycleTests
         f.Now = f.Now.AddMinutes(29);
         await f.Guard.TickAsync();
         Assert.False(f.Guard.IsAway);
+
+        // Nobody has been back all along, but the group waits its minutes again instead of acting the moment it ends.
         f.Now = f.Now.AddMinutes(1);
         await f.Guard.TickAsync();
         Assert.Null(f.Guard.PauseReason);
+        Assert.False(f.Guard.IsAway);
+        f.Now = f.Now.AddMinutes(f.Settings.AwayMinutes);
+        await f.Guard.TickAsync();
         Assert.True(f.Guard.IsAway);
     }
 
@@ -146,6 +151,47 @@ public class AwayLifecycleTests
         Assert.True(f.Guard.IsAway);
         Assert.Contains("couldn't", f.Guard.Status);
         Assert.Contains("back on", f.Guard.VerdictGroup!.Failures["stick"]);
+    }
+
+    [Fact]
+    public async Task A_failed_restoration_while_paused_isnt_retried_every_second()
+    {
+        var f = new Fixture();
+        await f.Guard.TickAsync();
+        f.FailOn = true;
+        await f.Guard.PauseAsync(TimeSpan.FromMinutes(30));
+        Assert.Equal(1, f.OnAttempts);
+        for (var i = 0; i < 60; i++)
+        {
+            f.Now = f.Now.AddSeconds(1);
+            await f.Guard.TickAsync();
+        }
+        Assert.Equal(1, f.OnAttempts);
+        Assert.True(f.Guard.IsAway);
+
+        f.FailOn = false;
+        f.Human = f.Now = f.Now.AddSeconds(1);
+        await f.Guard.TickAsync();
+        Assert.Equal(2, f.OnAttempts);
+        Assert.False(f.Guard.IsAway);
+    }
+
+    [Fact]
+    public async Task A_failed_restoration_retries_on_input_at_most_every_30_seconds()
+    {
+        var f = new Fixture();
+        await f.Guard.TickAsync();
+        f.FailOn = true;
+        await f.Guard.ComeBackAsync("the PC was unlocked");
+        var failedAt = f.Now;
+        // Someone is busy at the mouse while the device stays held.
+        while (f.Now < failedAt + AwayGuard.RetryEvery * 2.5)
+        {
+            f.Human = f.Now = f.Now.AddSeconds(1);
+            await f.Guard.TickAsync();
+        }
+        Assert.Equal(3, f.OnAttempts); // the unlock, then once per 30 seconds
+        Assert.True(f.Guard.IsAway);
     }
 
     [Fact]
@@ -236,7 +282,7 @@ public class AwayLifecycleTests
         await f.Guard.ComeBackAsync("the PC was unlocked");
         Assert.True(f.Guard.IsAway);
         f.FailOn = false;
-        f.Human = f.Now = f.Now.AddSeconds(1);
+        f.Human = f.Now = f.Now + AwayGuard.RetryEvery;
         await f.Guard.TickAsync();
 
         Assert.False(f.Guard.IsAway);

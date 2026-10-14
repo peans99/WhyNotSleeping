@@ -29,6 +29,7 @@ internal sealed class MainForm : Form
     readonly List<string> _eventHistory = [];
     readonly ComboBox _eventCategory = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 160 };
     readonly TextBox _eventSearch = new() { Width = 200, PlaceholderText = "Search events" };
+    readonly System.Windows.Forms.Timer _searchDelay = new() { Interval = 250 }; // filter once typing pauses
     readonly Button _exportLog;
     readonly string? _logPath;
     readonly SemaphoreSlim _overrideGate = new(1, 1);
@@ -195,7 +196,8 @@ internal sealed class MainForm : Form
         _eventCategory.Items.AddRange(["All events", "Screen changes", "Input", "Power requests", "Device actions", "Power & sleep", "Other"]);
         _eventCategory.SelectedIndex = 0;
         _eventCategory.SelectedIndexChanged += (_, _) => RefreshEvents();
-        _eventSearch.TextChanged += (_, _) => RefreshEvents();
+        _searchDelay.Tick += (_, _) => RefreshEvents();
+        _eventSearch.TextChanged += (_, _) => { _searchDelay.Stop(); _searchDelay.Start(); };
         var eventFilters = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = true, Margin = new Padding(0, 0, 0, 6) };
         eventFilters.Controls.AddRange([
             new Label { Text = "Show", AutoSize = true, Margin = new Padding(0, 5, 6, 0) }, _eventCategory, _eventSearch,
@@ -392,7 +394,7 @@ internal sealed class MainForm : Form
         ShowEvents(r);
         ShowOverrides(s);
 
-        _banner.Visible = s.Requests == null;
+        _banner.Visible = !_isAdmin;
         _status.Text = $"Updated {s.Time:HH:mm:ss}, refreshes every {_app.IntervalSeconds} s. " +
                        $"Idle time: {r.LastInputDescription}. Closing this window keeps it running in the notification area.";
     }
@@ -496,8 +498,8 @@ internal sealed class MainForm : Form
 
     void ShowRequests(Report r)
     {
-        var empty = r.Snapshot.Requests == null
-            ? "Restart as administrator to see which apps and drivers are keeping the PC awake."
+        var empty = r.Snapshot.PowerCfgError is { } error ? $"Couldn't ask Windows this time: {error}"
+            : r.Snapshot.Requests == null ? "Restart as administrator to see which apps and drivers are keeping the PC awake."
             : "Nothing is asking Windows to stay awake right now.";
         Fill(_requests, r.Active.Select(a => new ListViewItem([
             FriendlyCategory(a.Request.Category), a.Request.ShortName, a.Request.Reason,
@@ -629,34 +631,53 @@ internal sealed class MainForm : Form
                 : "Windows doesn't describe this device's controls.");
     }
 
-    /// <summary>Keeps recent history independently of the filters, so changing a filter brings older rows back.</summary>
+    const int MaxEvents = 1000;
+
+    /// <summary>
+    /// Keeps recent history apart from the filters, so changing a filter brings older rows back. New events are only
+    /// added (newest first), so the list keeps its scroll position and selection.
+    /// </summary>
     void ShowEvents(Report r)
     {
         var fresh = (int)Math.Min(r.TotalEvents - _eventsShown, r.Events.Count);
         _eventsShown = r.TotalEvents;
         if (fresh <= 0) return;
-        _eventHistory.AddRange(r.Events.TakeLast(fresh));
-        if (_eventHistory.Count > 1000) _eventHistory.RemoveRange(0, _eventHistory.Count - 1000);
-        RefreshEvents();
+        var lines = r.Events.TakeLast(fresh).ToList();
+        _eventHistory.AddRange(lines);
+        if (_eventHistory.Count > MaxEvents) _eventHistory.RemoveRange(0, _eventHistory.Count - MaxEvents);
+        if (_events.Items.Count == 0)
+        {
+            RefreshEvents(); // also hides the "no events" text
+            return;
+        }
+        var matching = lines.Where(line => EventLogView.Matches(line, SelectedEventCategory, _eventSearch.Text)).ToList();
+        if (matching.Count == 0) return;
+        _events.BeginUpdate();
+        foreach (var line in matching) _events.Items.Insert(0, EventItem(line));
+        while (_events.Items.Count > MaxEvents) _events.Items.RemoveAt(_events.Items.Count - 1);
+        _events.EndUpdate();
     }
 
     EventCategory SelectedEventCategory => (EventCategory)Math.Max(_eventCategory.SelectedIndex, 0);
 
     void RefreshEvents()
     {
+        _searchDelay.Stop();
         var lines = _eventHistory.AsEnumerable().Reverse().Where(line => EventLogView.Matches(line, SelectedEventCategory, _eventSearch.Text));
-        Fill(_events, lines.Select(line =>
+        Fill(_events, lines.Select(EventItem), "No events match these filters.");
+    }
+
+    static ListViewItem EventItem(string line)
+    {
+        var (time, text) = EventLogView.Split(line);
+        return new ListViewItem([time, text.Trim()])
         {
-            var (time, text) = EventLogView.Split(line);
-            return new ListViewItem([time, text.Trim()])
-            {
-                Tag = line,
-                ToolTipText = text,
-                ForeColor = (EventLogView.Category(line) == EventCategory.DeviceActions && text.Contains("couldn't", StringComparison.OrdinalIgnoreCase)) ? Red
-                    : text.StartsWith("+ new") ? Amber : text.StartsWith("- released") ? Green
-                    : text.StartsWith("* input") ? Purple : Blue,
-            };
-        }), "No events match these filters.");
+            Tag = line,
+            ToolTipText = text,
+            ForeColor = (EventLogView.Category(line) == EventCategory.DeviceActions && text.Contains("couldn't", StringComparison.OrdinalIgnoreCase)) ? Red
+                : text.StartsWith("+ new") ? Amber : text.StartsWith("- released") ? Green
+                : text.StartsWith("* input") ? Purple : Blue,
+        };
     }
 
     async Task ExportLogAsync()
