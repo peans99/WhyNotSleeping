@@ -147,7 +147,7 @@ internal static class DeviceSwitch
         _ => $"Windows refused (configuration manager error 0x{result:X2}).",
     };
 
-    static List<TurnedOffDevice> Load(string path)
+    internal static List<TurnedOffDevice> Load(string path)
     {
         try
         {
@@ -161,12 +161,15 @@ internal static class DeviceSwitch
         }
     }
 
-    static void Save(string path, IEnumerable<TurnedOffDevice> devices)
+    internal static void Save(string path, IEnumerable<TurnedOffDevice> devices)
     {
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllLines(path, devices.Select(d => $"{d.InstanceId}\t{d.Name}"));
+            // The next start reads this to turn devices back on, so a failed write must leave the old list.
+            AtomicFile.Write(path, writer =>
+            {
+                foreach (var d in devices) writer.WriteLine($"{d.InstanceId}\t{d.Name}");
+            });
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* the device is still off; only the reminder is lost */ }
     }

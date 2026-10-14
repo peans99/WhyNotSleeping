@@ -116,20 +116,14 @@ internal static class Startup
     /// <summary>Runs schtasks.exe. Only the exit code is read for decisions: its messages are in the Windows display language.</summary>
     static (int Exit, string Output) Schtasks(params string[] arguments)
     {
-        var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "schtasks.exe"))
-        {
-            UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true,
-        };
+        var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "schtasks.exe"));
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
         try
         {
-            using var process = Process.Start(start)!;
-            var error = process.StandardError.ReadToEndAsync();
-            var output = process.StandardOutput.ReadToEnd();
-            process.WaitForExit();
-            return (process.ExitCode, output + error.Result);
+            var result = ProcessRunner.RunAsync(start, TimeSpan.FromSeconds(10)).GetAwaiter().GetResult();
+            return (result.ExitCode, result.Output + result.Error);
         }
-        catch (System.ComponentModel.Win32Exception ex)
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or TimeoutException or InvalidOperationException)
         {
             return (-1, ex.Message);
         }

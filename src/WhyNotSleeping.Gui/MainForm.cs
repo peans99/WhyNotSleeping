@@ -26,6 +26,13 @@ internal sealed class MainForm : Form
     readonly Settings _settings;
     readonly AwayGuard _away;
     long _eventsShown;
+    readonly List<string> _eventHistory = [];
+    readonly ComboBox _eventCategory = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 160 };
+    readonly TextBox _eventSearch = new() { Width = 200, PlaceholderText = "Search events" };
+    readonly System.Windows.Forms.Timer _searchDelay = new() { Interval = 250 }; // filter once typing pauses
+    readonly Button _exportLog;
+    readonly string? _logPath;
+    readonly SemaphoreSlim _overrideGate = new(1, 1);
 
     readonly Panel _banner;
     readonly StatusCard _sleepCard = new("SLEEP");
@@ -55,13 +62,14 @@ internal sealed class MainForm : Form
         _isAdmin = isAdmin;
         _settings = settings;
         _away = away;
+        _logPath = logPath;
 
         Text = "WhyNotSleeping";
         Font = new Font("Segoe UI", 9.75f);
         BackColor = Background;
         ForeColor = TextColor;
         ClientSize = new Size(1000, 720);
-        MinimumSize = new Size(780, 580);
+        MinimumSize = new Size(780, 660);
         StartPosition = FormStartPosition.CenterScreen;
         using (var icon = typeof(MainForm).Assembly.GetManifestResourceStream("app.ico"))
             if (icon != null) Icon = new Icon(icon);
@@ -69,7 +77,7 @@ internal sealed class MainForm : Form
         // Limited-mode banner
         var bannerText = new Label
         {
-            Text = "Limited mode: without administrator rights, Windows won't say which apps and drivers are keeping the PC awake.",
+            Text = "Limited mode: restart as administrator to see apps and drivers keeping the PC awake.",
             AutoSize = true, Anchor = AnchorStyles.Left, ForeColor = Theme.BannerText, Margin = new Padding(0, 6, 12, 6),
         };
         var elevate = new Button { Text = "Restart as administrator", AutoSize = true, Anchor = AnchorStyles.Right, FlatStyle = FlatStyle.System };
@@ -183,6 +191,23 @@ internal sealed class MainForm : Form
         openLog.Click += (_, _) => { if (File.Exists(logPath)) Open(logPath); };
         var openFolder = new Button { Text = "Open log folder", AutoSize = true, Enabled = logPath != null, FlatStyle = FlatStyle.System };
         openFolder.Click += (_, _) => { if (Path.GetDirectoryName(logPath) is { } dir) Open(dir); };
+        _exportLog = new Button { Text = "Export filtered log...", AutoSize = true, FlatStyle = FlatStyle.System };
+        _exportLog.Click += async (_, _) => await ExportLogAsync();
+        _eventCategory.Items.AddRange(["All events", "Screen changes", "Input", "Power requests", "Device actions", "Power & sleep", "Other"]);
+        _eventCategory.SelectedIndex = 0;
+        _eventCategory.SelectedIndexChanged += (_, _) => RefreshEvents();
+        _searchDelay.Tick += (_, _) => RefreshEvents();
+        _eventSearch.TextChanged += (_, _) => { _searchDelay.Stop(); _searchDelay.Start(); };
+        var eventFilters = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = true, Margin = new Padding(0, 0, 0, 6) };
+        eventFilters.Controls.AddRange([
+            new Label { Text = "Show", AutoSize = true, Margin = new Padding(0, 5, 6, 0) }, _eventCategory, _eventSearch,
+        ]);
+        var eventLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Margin = Padding.Empty };
+        eventLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        eventLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        eventLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        eventLayout.Controls.Add(eventFilters, 0, 0);
+        eventLayout.Controls.Add(Cell(_events), 0, 1);
 
         var tabs = new TabControl { Dock = DockStyle.Fill, Padding = new Point(14, 5) };
         tabs.TabPages.Add(Page("Keeping it awake",
@@ -259,7 +284,8 @@ internal sealed class MainForm : Form
         SyncAwaySettings();
 
         tabs.TabPages.Add(Page("Event log",
-            logPath is null ? "What changed, newest first." : $"What changed, newest first. Also saved to {logPath}", _events, openLog, openFolder));
+            logPath is null ? "Recent events, newest first. Export saves the events shown by your filters."
+                : $"Recent events, newest first. Export applies your filters to the full saved log: {logPath}", eventLayout, _exportLog, openLog, openFolder));
         tabs.TabPages.Add(Page("Ignored apps",
             "Apps whose requests Windows disregards (powercfg /requestsoverride).", _overrides, _unignore));
 
@@ -368,7 +394,7 @@ internal sealed class MainForm : Form
         ShowEvents(r);
         ShowOverrides(s);
 
-        _banner.Visible = s.Requests == null;
+        _banner.Visible = !_isAdmin;
         _status.Text = $"Updated {s.Time:HH:mm:ss}, refreshes every {_app.IntervalSeconds} s. " +
                        $"Idle time: {r.LastInputDescription}. Closing this window keeps it running in the notification area.";
     }
@@ -384,7 +410,8 @@ internal sealed class MainForm : Form
     internal void ShowAway()
     {
         _awayStatus.Text = _away.Status;
-        _awayStatus.ForeColor = _away.IsAway ? Blue : _settings.AwayEnabled ? TextColor : Muted;
+        _awayStatus.ForeColor = _away.VerdictGroup?.Failures.Count > 0 ? Red
+            : _away.PauseReason != null ? Amber : _away.IsAway ? Blue : _settings.AwayEnabled ? TextColor : Muted;
         var now = DateTime.Now;
         var rows = _settings.AwayDevices.Select(d => new ListViewItem([d.Name, _away.Describe(d, now)])
         {
@@ -471,8 +498,8 @@ internal sealed class MainForm : Form
 
     void ShowRequests(Report r)
     {
-        var empty = r.Snapshot.Requests == null
-            ? "Restart as administrator to see which apps and drivers are keeping the PC awake."
+        var empty = r.Snapshot.PowerCfgError is { } error ? $"Couldn't ask Windows this time: {error}"
+            : r.Snapshot.Requests == null ? "Restart as administrator to see which apps and drivers are keeping the PC awake."
             : "Nothing is asking Windows to stay awake right now.";
         Fill(_requests, r.Active.Select(a => new ListViewItem([
             FriendlyCategory(a.Request.Category), a.Request.ShortName, a.Request.Reason,
@@ -524,17 +551,20 @@ internal sealed class MainForm : Form
             "Turn off this device", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
         if (answer != DialogResult.Yes) return;
         var error = await Task.Run(() => DeviceSwitch.TurnOff(device.InstanceId!, device.ShortName));
-        AfterDeviceSwitch(error);
+        AfterDeviceSwitch(error, device.ShortName, off: true);
     }
 
     async void TurnOnSelected()
     {
         if (Selected(_inputs) is not TurnedOffDevice device || !_isAdmin) return;
-        AfterDeviceSwitch(await Task.Run(() => DeviceSwitch.TurnOn(device.InstanceId)));
+        AfterDeviceSwitch(await Task.Run(() => DeviceSwitch.TurnOn(device.InstanceId)), device.Name, off: false);
     }
 
-    void AfterDeviceSwitch(string? error)
+    void AfterDeviceSwitch(string? error, string name, bool off)
     {
+        _app.Log(error is null ? $"* device: turned {(off ? "off" : "on")} {name}"
+            : $"* device: couldn't turn {(off ? "off" : "on")} {name}: {error}");
+        if (IsDisposed) return;
         if (error != null)
             MessageBox.Show(this, error, "WhyNotSleeping", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         _app.RefreshNow();
@@ -601,25 +631,85 @@ internal sealed class MainForm : Form
                 : "Windows doesn't describe this device's controls.");
     }
 
-    /// <summary>Appends only events not shown yet (newest first), so the list keeps its scroll position.</summary>
+    const int MaxEvents = 1000;
+
+    /// <summary>
+    /// Keeps recent history apart from the filters, so changing a filter brings older rows back. New events are only
+    /// added (newest first), so the list keeps its scroll position and selection.
+    /// </summary>
     void ShowEvents(Report r)
     {
         var fresh = (int)Math.Min(r.TotalEvents - _eventsShown, r.Events.Count);
         _eventsShown = r.TotalEvents;
         if (fresh <= 0) return;
-        _events.BeginUpdate();
-        foreach (var line in r.Events.TakeLast(fresh))
+        var lines = r.Events.TakeLast(fresh).ToList();
+        _eventHistory.AddRange(lines);
+        if (_eventHistory.Count > MaxEvents) _eventHistory.RemoveRange(0, _eventHistory.Count - MaxEvents);
+        if (_events.Items.Count == 0)
         {
-            var (time, text) = line.Length > 20 ? (line[..19], line[20..]) : ("", line);
-            _events.Items.Insert(0, new ListViewItem([time, text.Trim()])
-            {
-                ToolTipText = text,
-                ForeColor = text.StartsWith("+ new") ? Amber : text.StartsWith("- released") ? Green
-                    : text.StartsWith("* input") ? Purple : Blue,
-            });
+            RefreshEvents(); // also hides the "no events" text
+            return;
         }
-        while (_events.Items.Count > 1000) _events.Items.RemoveAt(_events.Items.Count - 1);
+        var matching = lines.Where(line => EventLogView.Matches(line, SelectedEventCategory, _eventSearch.Text)).ToList();
+        if (matching.Count == 0) return;
+        _events.BeginUpdate();
+        foreach (var line in matching) _events.Items.Insert(0, EventItem(line));
+        while (_events.Items.Count > MaxEvents) _events.Items.RemoveAt(_events.Items.Count - 1);
         _events.EndUpdate();
+    }
+
+    EventCategory SelectedEventCategory => (EventCategory)Math.Max(_eventCategory.SelectedIndex, 0);
+
+    void RefreshEvents()
+    {
+        _searchDelay.Stop();
+        var lines = _eventHistory.AsEnumerable().Reverse().Where(line => EventLogView.Matches(line, SelectedEventCategory, _eventSearch.Text));
+        Fill(_events, lines.Select(EventItem), "No events match these filters.");
+    }
+
+    static ListViewItem EventItem(string line)
+    {
+        var (time, text) = EventLogView.Split(line);
+        return new ListViewItem([time, text.Trim()])
+        {
+            Tag = line,
+            ToolTipText = text,
+            ForeColor = (EventLogView.Category(line) == EventCategory.DeviceActions && text.Contains("couldn't", StringComparison.OrdinalIgnoreCase)) ? Red
+                : text.StartsWith("+ new") ? Amber : text.StartsWith("- released") ? Green
+                : text.StartsWith("* input") ? Purple : Blue,
+        };
+    }
+
+    async Task ExportLogAsync()
+    {
+        using var dialog = new SaveFileDialog
+        {
+            Title = "Export filtered event log",
+            Filter = "Log files (*.log)|*.log|Text files (*.txt)|*.txt|All files (*.*)|*.*",
+            FileName = $"whynotsleeping-{DateTime.Now:yyyy-MM-dd-HHmmss}.log",
+            DefaultExt = "log",
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        if (_logPath != null && Path.GetFullPath(dialog.FileName).Equals(Path.GetFullPath(_logPath), StringComparison.OrdinalIgnoreCase))
+        {
+            MessageBox.Show(this, "Choose a different file so monitoring can keep writing to its log.", "Export log", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        var category = SelectedEventCategory;
+        var search = _eventSearch.Text;
+        var recent = _eventHistory.ToArray();
+        _exportLog.Enabled = false;
+        try
+        {
+            var count = await Task.Run(() => EventLogView.Export(dialog.FileName,
+                _logPath != null && File.Exists(_logPath) ? EventLogView.ReadFile(_logPath) : recent, category, search));
+            if (!IsDisposed) _status.Text = $"Exported {count} events to {dialog.FileName}.";
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            if (!IsDisposed) MessageBox.Show(this, ex.Message, "Couldn't export the log", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        finally { if (!IsDisposed) _exportLog.Enabled = true; }
     }
 
     void ShowOverrides(Snapshot s)
@@ -629,7 +719,7 @@ internal sealed class MainForm : Form
         _unignore.Enabled = _isAdmin && Selected(_overrides) is RequestOverride;
     }
 
-    void IgnoreSelected()
+    async void IgnoreSelected()
     {
         if (Selected(_requests) is not PowerRequest { Kind: "PROCESS" } request) return;
         var name = Path.GetFileName(request.Name);
@@ -641,15 +731,35 @@ internal sealed class MainForm : Form
         if (answer != DialogResult.Yes) return;
 
         // powercfg replaces an app's override, so keep the request types it already ignores.
-        var existing = PowerCfg.GetOverrides().FirstOrDefault(o => o.CallerType == "PROCESS" && o.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
-        var requests = (existing?.Requests ?? Array.Empty<string>()).Append(request.Category).Distinct().ToList();
-        AfterOverride(PowerCfg.SetOverride("PROCESS", name, requests));
+        await ChangeOverrideAsync(() =>
+        {
+            var existing = PowerCfg.GetOverrides().FirstOrDefault(o => o.CallerType == "PROCESS" && o.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+            var requests = (existing?.Requests ?? Array.Empty<string>()).Append(request.Category).Distinct().ToList();
+            return PowerCfg.SetOverride("PROCESS", name, requests);
+        });
     }
 
-    void UnignoreSelected()
+    async void UnignoreSelected()
     {
         if (Selected(_overrides) is not RequestOverride o) return;
-        AfterOverride(PowerCfg.SetOverride(o.CallerType, o.Name, []));
+        await ChangeOverrideAsync(() => PowerCfg.SetOverride(o.CallerType, o.Name, []));
+    }
+
+    async Task ChangeOverrideAsync(Func<string?> change)
+    {
+        // Each command replaces an app's override: keep consecutive clicks from losing each other's request types.
+        await _overrideGate.WaitAsync();
+        try
+        {
+            if (IsDisposed) return;
+            var error = await Task.Run(change);
+            if (!IsDisposed) AfterOverride(error);
+        }
+        catch (Exception ex) when (ex is TimeoutException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            if (!IsDisposed) AfterOverride(ex.Message);
+        }
+        finally { _overrideGate.Release(); }
     }
 
     void AfterOverride(string? error)

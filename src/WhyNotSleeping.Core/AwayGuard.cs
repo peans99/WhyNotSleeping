@@ -23,12 +23,21 @@ internal sealed class AwayGuard(Settings settings, bool isAdmin, Action<string> 
         public Func<string, string?> On { get; init; } = DeviceSwitch.AwayOn;
     }
 
+    /// <summary>
+    /// After devices couldn't be turned back on, how long until input retries: whatever holds them rarely lets go
+    /// sooner, and every try is logged. The tray item retries at once.
+    /// </summary>
+    internal static readonly TimeSpan RetryEvery = TimeSpan.FromSeconds(30);
+
     readonly Services _services = services ?? new();
     /// <summary>Input before this doesn't count: the start, or when the devices last came back on.</summary>
     DateTime _watchFrom = services?.Now() ?? DateTime.Now;
     DateTime? _awaySince;
     DateTime? _failedAt;
     string? _failure;
+    Dictionary<string, string> _deviceFailures = new(StringComparer.OrdinalIgnoreCase);
+    DateTime? _pauseUntil;
+    bool _pauseUntilRestart;
     readonly SemaphoreSlim _gate = new(1, 1);
     bool _stopping;
     string? _returnReason;
@@ -48,6 +57,37 @@ internal sealed class AwayGuard(Settings settings, bool isAdmin, Action<string> 
     /// <summary>What it is doing or waiting for, in a sentence.</summary>
     public string Status { get; private set; } = "";
 
+    public string? PauseReason => _pauseUntilRestart ? "Paused until WhyNotSleeping restarts."
+        : _pauseUntil is { } until && _services.Now() < until ? $"Paused until {until:HH:mm}." : null;
+
+    /// <summary>A copy for the monitor's worker thread: failures and pauses remain unresolved blockers.</summary>
+    public AwayGroup? VerdictGroup => settings.AwayEnabled && isAdmin && settings.AwayDevices.Count > 0
+        ? new AwayGroup(settings.AwayDevices.Select(d => d.InstanceId).ToHashSet(StringComparer.OrdinalIgnoreCase), settings.AwayMinutes)
+        {
+            Failures = new Dictionary<string, string>(_deviceFailures, StringComparer.OrdinalIgnoreCase),
+            PauseReason = PauseReason,
+        } : null;
+
+    public async Task PauseAsync(TimeSpan? duration)
+    {
+        if (duration is { } time && time <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(duration));
+        _pauseUntilRestart = duration == null;
+        _pauseUntil = duration is { } span ? _services.Now() + span : null;
+        log($"* away: {PauseReason}");
+        await ComeBackAsync("the away group was paused");
+        Status = IsAway ? "Pause requested, but some devices couldn't be turned back on: see the event log."
+            : PauseReason ?? "Back on.";
+    }
+
+    public void Resume()
+    {
+        _pauseUntilRestart = false;
+        _pauseUntil = null;
+        _watchFrom = _services.Now();
+        Status = "Resumed: starting a new away countdown.";
+        log("* away: resumed");
+    }
+
     public async Task TickAsync()
     {
         if (_stopping || !_gate.Wait(0)) return;
@@ -63,21 +103,44 @@ internal sealed class AwayGuard(Settings settings, bool isAdmin, Action<string> 
         var human = _services.Human();
         var controller = _services.Controller();
         var present = controller is { } c && c.Time > human ? c.Time : human;
+        if (_pauseUntil is { } until && now >= until)
+        {
+            // Like Resume: the countdown starts now, not when the pause began, or it would act the moment it ends.
+            _pauseUntil = null;
+            _watchFrom = now;
+            log("* away: the pause ended");
+        }
         if (IsAway)
         {
             var since = _awaySince ?? _watchFrom;
-            if (present > since || !settings.AwayEnabled || _off.Any(id => !settings.InAwayGroup(id)))
-                await RestoreAsync(controller is { } used && used.Time > since && used.Time >= human
-                    ? $"{used.Device} was used: {used.What}"
-                    : present > since ? "the keyboard or mouse was used" : "the away group was changed");
+            var used = controller is { } u && u.Time > since && u.Time >= human ? $"{u.Device} was used: {u.What}" : "the keyboard or mouse was used";
+            if (_awaySince == null)
+            {
+                // Turning them back on failed (_watchFrom is when): retry on later input, but not every second.
+                if (present > since && now - since >= RetryEvery)
+                    await RestoreAsync(used);
+                else
+                    Status = "Some devices couldn't be turned back on: see the event log. Use the tray menu to retry.";
+            }
+            else if (present > since)
+                await RestoreAsync(used);
+            else if (PauseReason != null || !settings.AwayEnabled || _off.Any(id => !settings.InAwayGroup(id)))
+                await RestoreAsync(PauseReason != null ? "the away group was paused"
+                    : !settings.AwayEnabled ? "the away group was turned off" : "the away group was changed");
             else
-                Status = _awaySince != null
-                    ? $"Turned off at {since:HH:mm}. Move the mouse, press a key or use a controller to turn {(_off.Count == 1 ? "it" : "them")} back on."
-                    : "Some devices couldn't be turned back on: see the event log. Use the tray menu to retry.";
+                Status = $"Turned off at {since:HH:mm}. Move the mouse, press a key or use a controller to turn {(_off.Count == 1 ? "it" : "them")} back on.";
+            return;
+        }
+        if (PauseReason is { } pause)
+        {
+            Status = pause;
             return;
         }
         if (_failedAt is { } failed && present > failed)
+        {
             _failedAt = null; // they were back: worth another try next time
+            _deviceFailures.Clear();
+        }
         var moment = new AwayMoment(now, human, controller, _watchFrom, _failedAt != null ? _failure : null,
             _services.LastInput, _services.FullScreen);
         if (Waiting(settings, isAdmin, moment) is { } waiting)
@@ -137,15 +200,21 @@ internal sealed class AwayGuard(Settings settings, bool isAdmin, Action<string> 
         if (results.Count == 0) return;
 
         foreach (var (device, error) in results.Where(r => r.Error != null))
+        {
             log($"* away: couldn't turn off {device.Name}: {error}");
+            _deviceFailures[device.InstanceId] = $"Couldn't turn off {device.Name}: {error}";
+        }
         var off = results.Where(r => r.Error is null).Select(r => r.Device).ToList();
         var failed = results.FirstOrDefault(r => r.Error != null);
         if (failed.Error != null)
-            Failed?.Invoke($"Couldn't turn off {failed.Device.Name}. {failed.Error}");
-        if (off.Count == 0)
         {
             _failedAt = _services.Now();
-            _failure = failed.Error;
+            _failure = $"{failed.Device.Name}: {failed.Error}";
+            Failed?.Invoke($"Couldn't turn off {failed.Device.Name}. {failed.Error}");
+        }
+        if (off.Count == 0)
+        {
+            Status = $"Couldn't turn them off: {_failure} It tries again once you've been back.";
             return;
         }
 
@@ -153,7 +222,7 @@ internal sealed class AwayGuard(Settings settings, bool isAdmin, Action<string> 
         _awaySince = now;
         // Disabling runs on a worker thread. Input, unlock, settings changes or Exit can arrive while it runs.
         // Recheck before asking Windows to turn off the screen or sleep, then restore under the same gate.
-        if (_stopping || _returnReason != null || _services.Human() > now || _services.Controller()?.Time > now ||
+        if (_stopping || _returnReason != null || PauseReason != null || _services.Human() > now || _services.Controller()?.Time > now ||
             !settings.AwayEnabled || off.Any(d => !settings.InAwayGroup(d.InstanceId)) ||
             (settings.AwaySkipFullScreen && _services.FullScreen()))
         {
@@ -229,6 +298,10 @@ internal sealed class AwayGuard(Settings settings, bool isAdmin, Action<string> 
 
     void AfterTurningOn(List<(TurnedOffDevice Device, string? Error)> results, string reason)
     {
+        _failedAt = null;
+        _failure = null;
+        _deviceFailures = results.Where(r => r.Error != null).ToDictionary(r => r.Device.InstanceId,
+            r => $"Couldn't turn {r.Device.Name} back on: {r.Error}", StringComparer.OrdinalIgnoreCase);
         foreach (var (device, error) in results.Where(r => r.Error != null))
             log($"* back: couldn't turn {device.Name} back on: {error}");
         if (results.Where(r => r.Error is null).Select(r => r.Device.Name).ToList() is { Count: > 0 } on)
@@ -242,6 +315,7 @@ internal sealed class AwayGuard(Settings settings, bool isAdmin, Action<string> 
     /// <summary>For the group list: what a device is doing, as far as the away group is concerned.</summary>
     public string Describe(TurnedOffDevice device, DateTime now)
     {
+        if (_deviceFailures.TryGetValue(device.InstanceId, out var failure)) return failure;
         if (IsOff(device.InstanceId)) return "turned off while you're away";
         var (input, used, how) = InputMonitor.Activity(device.InstanceId);
         if (used is { } u && now - u < TimeSpan.FromMinutes(settings.AwayMinutes))

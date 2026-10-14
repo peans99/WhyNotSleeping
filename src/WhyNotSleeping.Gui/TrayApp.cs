@@ -42,12 +42,21 @@ internal sealed class TrayApp : ApplicationContext
         var open = new ToolStripMenuItem("Open WhyNotSleeping", null, (_, _) => ShowWindow()) { Font = new Font(SystemFonts.MenuFont!, FontStyle.Bold) };
         _comeBackItem = new ToolStripMenuItem("Turn the away group back on", null, (_, _) => _ = _away.ComeBackAsync("turned back on from the tray"));
         _startupItem = new ToolStripMenuItem("Start with Windows", null, (_, _) => SetStartWithWindows(!StartsWithWindows));
+        var pause = new ToolStripMenuItem("Pause the away group");
+        pause.DropDownItems.AddRange([
+            new ToolStripMenuItem("For 30 minutes", null, async (_, _) => await PauseAwayAsync(TimeSpan.FromMinutes(30))),
+            new ToolStripMenuItem("For one hour", null, async (_, _) => await PauseAwayAsync(TimeSpan.FromHours(1))),
+            new ToolStripMenuItem("Until WhyNotSleeping restarts", null, async (_, _) => await PauseAwayAsync(null)),
+        ]);
+        var resume = new ToolStripMenuItem("Resume the away group", null, (_, _) => { _away.Resume(); UpdateAwayView(); });
         var menu = new ContextMenuStrip();
-        menu.Items.AddRange([open, _comeBackItem, new ToolStripSeparator(), _startupItem, new ToolStripSeparator(),
+        menu.Items.AddRange([open, _comeBackItem, pause, resume, new ToolStripSeparator(), _startupItem, new ToolStripSeparator(),
             new ToolStripMenuItem("Exit", null, (_, _) => Exit())]);
         menu.Opening += (_, _) =>
         {
             _comeBackItem.Visible = _away.IsAway;
+            pause.Enabled = _settings.AwayEnabled && _settings.AwayDevices.Count > 0;
+            resume.Visible = _away.PauseReason != null;
             _startupItem.Checked = StartsWithWindows;
             _startupItem.Enabled = isAdmin;
             _startupItem.Text = "Start with Windows" + (isAdmin ? "" : " (needs administrator)");
@@ -61,12 +70,12 @@ internal sealed class TrayApp : ApplicationContext
         {
             try
             {
-                // The verdicts read a noisy device in the group as taken care of, while the group can act.
-                _monitor.Away = _settings is { AwayEnabled: true, AwayDevices.Count: > 0 } && _isAdmin
-                    ? new AwayGroup(_settings.AwayDevices.Select(d => d.InstanceId).ToHashSet(StringComparer.OrdinalIgnoreCase), _settings.AwayMinutes)
-                    : null;
                 await _away.TickAsync();
-                if (!_exiting && _form.Visible) _form.ShowAway();
+                if (!_exiting)
+                {
+                    _monitor.Away = _away.VerdictGroup;
+                    if (_form.Visible) _form.ShowAway();
+                }
             }
             catch (Exception ex)
             {
@@ -83,8 +92,24 @@ internal sealed class TrayApp : ApplicationContext
     public int IntervalSeconds => _monitor.IntervalSeconds;
     public bool StartsWithWindows { get; private set; }
 
+    async Task PauseAwayAsync(TimeSpan? duration)
+    {
+        try { await _away.PauseAsync(duration); }
+        catch (Exception ex) { _monitor.Log($"* away: couldn't pause: {ex.Message}"); }
+        if (!_exiting) UpdateAwayView();
+    }
+
+    void UpdateAwayView()
+    {
+        _monitor.Away = _away.VerdictGroup;
+        if (_form.Visible) _form.ShowAway();
+        RefreshNow();
+    }
+
     /// <summary>Refreshes now instead of at the next tick.</summary>
     public void RefreshNow() => _wake.TrySetResult();
+
+    public void Log(string message) => _monitor.Log(message);
 
     async Task RunAsync()
     {
@@ -94,6 +119,7 @@ internal sealed class TrayApp : ApplicationContext
         _awayTimer.Start();
         while (!_exiting)
         {
+            _wake = new TaskCompletionSource();
             try
             {
                 var report = await Task.Run(_monitor.Tick);
@@ -105,7 +131,6 @@ internal sealed class TrayApp : ApplicationContext
             {
                 if (!_exiting) _form.ShowError(ex.Message);
             }
-            _wake = new TaskCompletionSource();
             await Task.WhenAny(Task.Delay(TimeSpan.FromSeconds(_monitor.IntervalSeconds)), _wake.Task);
         }
     }
@@ -113,8 +138,8 @@ internal sealed class TrayApp : ApplicationContext
     /// <summary>The tray tooltip: both verdicts, or that the away group is off. Windows cuts it at 127 characters.</summary>
     string TrayText(Report r)
     {
-        var text = _away.IsAway
-            ? "WhyNotSleeping\nAway: the away group is turned off"
+        var text = _away.IsAway || _away.PauseReason != null || _away.VerdictGroup?.Failures.Count > 0
+            ? $"WhyNotSleeping\n{_away.Status}"
             : $"WhyNotSleeping\n{Gui.MainForm.SleepHeadline(r)}\n{Gui.MainForm.ScreenHeadline(r)}"; // not ApplicationContext.MainForm
         return text.Length <= 127 ? text : text[..127];
     }
