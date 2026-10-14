@@ -26,9 +26,13 @@ internal sealed class TrayApp : ApplicationContext
         _away = new AwayGuard(_settings, isAdmin, _monitor.Log);
         _form = new MainForm(this, isAdmin, logPath, _settings, _away);
         _ = _form.Handle; // so it can be updated, and found by a second copy, while hidden
-        _form.FormClosed += (_, _) => // Windows shutting down or signing out, or Exit
+        _form.FormClosed += (_, e) => // Windows shutting down or signing out, or Exit
         {
             _formClosed = true;
+            // Windows may end the process as soon as this returns, before an awaited restore gets to run, and a
+            // device turned off "until restart" stays off through a sign-out or Fast Startup. So restore now.
+            if (e.CloseReason is CloseReason.WindowsShutDown or CloseReason.TaskManagerClosing)
+                _away.StopNow("Windows is signing out or shutting down");
             Exit();
         };
 

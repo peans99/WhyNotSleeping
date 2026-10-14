@@ -32,6 +32,8 @@ internal sealed class AwayGuard(Settings settings, bool isAdmin, Action<string> 
     readonly SemaphoreSlim _gate = new(1, 1);
     bool _stopping;
     string? _returnReason;
+    Task? _disabling; // the worker turning devices off, while it runs
+    List<TurnedOffDevice> _disablingDevices = [];
     HashSet<string> _off = (services?.LeftOff() ?? DeviceSwitch.AwayOffList()).Select(d => d.InstanceId).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>The group's devices are off; the action to take next (screen off, sleep) is the app's.</summary>
@@ -125,8 +127,13 @@ internal sealed class AwayGuard(Settings settings, bool isAdmin, Action<string> 
         // One the user turned off themselves stays off: turning it back on is theirs to do.
         var manual = _services.Manual().Select(d => d.InstanceId).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var devices = settings.AwayDevices.Where(d => !manual.Contains(d.InstanceId)).ToList();
-        var results = await Task.Run(() => devices.Where(d => _services.IsPresent(d.InstanceId))
+        _disablingDevices = devices;
+        var disabling = Task.Run(() => devices.Where(d => _services.IsPresent(d.InstanceId))
             .Select(d => (Device: d, Error: _services.Off(d.InstanceId, d.Name))).ToList());
+        _disabling = disabling;
+        var results = await disabling;
+        _disabling = null;
+        _disablingDevices = [];
         if (results.Count == 0) return;
 
         foreach (var (device, error) in results.Where(r => r.Error != null))
@@ -181,19 +188,39 @@ internal sealed class AwayGuard(Settings settings, bool isAdmin, Action<string> 
 
     async Task RestoreAsync(string reason)
     {
-        // The file is best-effort. Keep devices disabled by this run recoverable even if its write failed.
-        // Copy the settings on the UI thread before the worker starts enabling devices.
-        var devices = _services.LeftOff().Concat(_off.Select(id =>
-                settings.AwayDevices.FirstOrDefault(d => d.InstanceId.Equals(id, StringComparison.OrdinalIgnoreCase)) ?? new(id, id)))
-            .DistinctBy(d => d.InstanceId, StringComparer.OrdinalIgnoreCase).ToList();
+        var devices = ToRestore();
         AfterTurningOn(await Task.Run(() => devices.Select(d => (d, _services.On(d.InstanceId))).ToList()), reason);
     }
+
+    /// <summary>
+    /// The file is best-effort. Keep devices disabled by this run recoverable even if its write failed.
+    /// Copied on the UI thread before a worker starts enabling devices.
+    /// </summary>
+    List<TurnedOffDevice> ToRestore() =>
+        _services.LeftOff().Concat(_off.Select(id =>
+                settings.AwayDevices.FirstOrDefault(d => d.InstanceId.Equals(id, StringComparison.OrdinalIgnoreCase)) ?? new(id, id)))
+            .DistinctBy(d => d.InstanceId, StringComparer.OrdinalIgnoreCase).ToList();
 
     /// <summary>Prevents new disables and waits for any in-flight disable before restoring devices on exit.</summary>
     public Task StopAsync()
     {
         _stopping = true;
         return ComeBackAsync("WhyNotSleeping exited");
+    }
+
+    /// <summary>
+    /// Windows is signing out or shutting down: the process may be ended as soon as the UI thread returns, so
+    /// nothing can be awaited. Waits a moment for a disable in flight (it runs on a worker, so this can't
+    /// deadlock), then turns everything back on before returning, including what that disable was turning off.
+    /// </summary>
+    public void StopNow(string reason)
+    {
+        _stopping = true;
+        try { _disabling?.Wait(TimeSpan.FromSeconds(10)); }
+        catch (AggregateException) { /* its failures are logged by GoAwayAsync, if it ever gets to run */ }
+        var devices = ToRestore().Concat(_disablingDevices).DistinctBy(d => d.InstanceId, StringComparer.OrdinalIgnoreCase).ToList();
+        if (devices.Count > 0)
+            AfterTurningOn(devices.Select(d => (d, _services.On(d.InstanceId))).ToList(), reason);
     }
 
     /// <summary>Devices left off by an earlier run that crashed or was killed.</summary>

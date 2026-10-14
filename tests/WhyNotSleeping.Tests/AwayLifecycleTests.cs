@@ -13,6 +13,8 @@ public class AwayLifecycleTests
         public Action? BeforeOff;
         public bool FailOn, ForgetOffRecord, FullScreen;
         public int Actions, OnAttempts;
+        /// <summary>Devices the fake Windows has turned off right now.</summary>
+        public int TurnedOff { get { lock (_sync) return _off.Count; } }
         public Settings Settings { get; } = new()
         {
             AwayEnabled = true,
@@ -206,5 +208,38 @@ public class AwayLifecycleTests
         Assert.False(f.Guard.IsAway);
         Assert.Equal(0, f.Actions);
         Assert.Equal(1, f.OnAttempts);
+    }
+
+    [Fact]
+    public async Task Session_end_while_away_restores_devices_before_returning()
+    {
+        var f = new Fixture();
+        await f.Guard.TickAsync();
+        Assert.Equal(1, f.TurnedOff);
+
+        // Nothing awaited: Windows may end the process the moment this returns.
+        f.Guard.StopNow("Windows is signing out or shutting down");
+
+        Assert.Equal(0, f.TurnedOff);
+        Assert.False(f.Guard.IsAway);
+    }
+
+    [Fact]
+    public async Task Session_end_during_disable_waits_for_it_then_restores_before_returning()
+    {
+        var f = new Fixture();
+        var pause = f.PauseDisable();
+        var tick = f.Guard.TickAsync();
+        await pause.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // The worker finishes turning the stick off while StopNow waits for it.
+        var finish = Task.Run(async () => { await Task.Delay(200); pause.Release(); });
+        f.Guard.StopNow("Windows is signing out or shutting down");
+
+        Assert.Equal(0, f.TurnedOff);
+        await Task.WhenAll(tick, finish);
+        Assert.Equal(0, f.TurnedOff);
+        Assert.False(f.Guard.IsAway);
+        Assert.Equal(0, f.Actions); // no screen-off or sleep after it
     }
 }
