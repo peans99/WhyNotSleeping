@@ -136,6 +136,68 @@ internal static class Native
     [DllImport("hid.dll")]
     public static extern uint HidP_MaxUsageListLength(int reportType, ushort usagePage, byte[] preparsed);
 
+    public const uint CrSuccess = 0;
+    public const uint CrNoSuchDevnode = 0x0D;
+    public const uint CrRemoveVetoed = 0x17;
+    public const uint CrAccessDenied = 0x33;
+    public const uint CmLocateDevnodePhantom = 1;
+    public const uint CmDisablePersist = 8;
+    public const uint DnHasProblem = 0x400;
+    public const uint CmProbDisabled = 0x16;
+
+    [DllImport("cfgmgr32.dll", EntryPoint = "CM_Locate_DevNodeW", CharSet = CharSet.Unicode)]
+    public static extern uint CM_Locate_DevNode(out uint devInst, string deviceId, uint flags);
+
+    [DllImport("cfgmgr32.dll")]
+    public static extern uint CM_Disable_DevNode(uint devInst, uint flags);
+
+    [DllImport("cfgmgr32.dll")]
+    public static extern uint CM_Enable_DevNode(uint devInst, uint flags);
+
+    public const uint CmDrpPhysicalDeviceObjectName = 0x0F;
+
+    [DllImport("cfgmgr32.dll", EntryPoint = "CM_Get_DevNode_Registry_PropertyW")]
+    public static extern uint CM_Get_DevNode_Registry_Property(uint devInst, uint property, out uint type, byte[] buffer, ref uint length, uint flags);
+
+    public const int SystemExtendedHandleInformation = 64;
+    public const uint StatusInfoLengthMismatch = 0xC0000004;
+    public const int ObjectNameInformation = 1;
+    public const uint ProcessDupHandle = 0x40;
+    public const uint DuplicateSameAccess = 2;
+    public const uint FileTypePipe = 3;
+
+    [DllImport("ntdll.dll")]
+    public static extern uint NtQuerySystemInformation(int infoClass, IntPtr buffer, int length, out int returnLength);
+
+    [DllImport("ntdll.dll")]
+    public static extern uint NtQueryObject(IntPtr handle, int infoClass, IntPtr buffer, int length, out int returnLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr OpenProcess(uint access, bool inherit, int processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool DuplicateHandle(IntPtr sourceProcess, IntPtr sourceHandle, IntPtr targetProcess, out IntPtr targetHandle,
+        uint access, bool inherit, uint options);
+
+    [DllImport("kernel32.dll")]
+    public static extern uint GetFileType(IntPtr file);
+
+    [DllImport("kernel32.dll")]
+    public static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetCurrentProcess();
+
+    public const uint CmRemoveUiNotOk = 1;
+    public const uint CmRemoveNoRestart = 2;
+
+    /// <summary>Like a safe removal; when something refuses, says who (vetoType is a PNP_VETO_TYPE).</summary>
+    [DllImport("cfgmgr32.dll", EntryPoint = "CM_Query_And_Remove_SubTreeW", CharSet = CharSet.Unicode)]
+    public static extern uint CM_Query_And_Remove_SubTree(uint devInst, out int vetoType, StringBuilder vetoName, int nameLength, uint flags);
+
+    [DllImport("cfgmgr32.dll")]
+    public static extern uint CM_Get_DevNode_Status(out uint status, out uint problem, uint devInst, uint flags);
+
     [DllImport("user32.dll", EntryPoint = "GetKeyNameTextW", CharSet = CharSet.Unicode)]
     public static extern int GetKeyNameText(int lParam, StringBuilder buffer, int size);
 

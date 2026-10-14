@@ -126,6 +126,25 @@ internal sealed class MainForm : Form
         _requests.ContextMenuStrip = requestMenu;
 
         _inputs = NewList(("Device", 100), ("Name", 250), ("Last input", 90), ("Idle resets", 80), ("Last minute", 85), ("What it's sending", 300));
+        var turnOff = new ToolStripMenuItem("Turn off this device...", null, (_, _) => TurnOffSelected());
+        var turnOn = new ToolStripMenuItem("Turn back on", null, (_, _) => TurnOnSelected());
+        var inputMenu = new ContextMenuStrip();
+        inputMenu.Items.AddRange([turnOff, turnOn]);
+        inputMenu.Opening += (_, e) =>
+        {
+            var selected = Selected(_inputs);
+            if (selected is null) { e.Cancel = true; return; }
+            var needsAdmin = _isAdmin ? "" : " (needs administrator)";
+            turnOff.Visible = selected is InputSource;
+            turnOff.Enabled = CanTurnOff(selected);
+            turnOff.Text = selected is InputSource { Kind: InputKind.Mouse or InputKind.Keyboard }
+                ? "Turn off this device (not for mice and keyboards)"
+                : "Turn off this device..." + needsAdmin;
+            turnOn.Visible = selected is TurnedOffDevice;
+            turnOn.Enabled = _isAdmin;
+            turnOn.Text = "Turn back on" + needsAdmin;
+        };
+        _inputs.ContextMenuStrip = inputMenu;
         _events = NewList(("Time", 150), ("Event", 760));
         _overrides = NewList(("Type", 100), ("Name", 300), ("Ignored requests", 260));
 
@@ -264,14 +283,54 @@ internal sealed class MainForm : Form
     void ShowInputs(Snapshot s)
     {
         var empty = InputMonitor.Available ? "No input seen yet." : "Raw input is unavailable.";
-        Fill(_inputs, s.Inputs.Select(i => new ListViewItem([
+        // A device turned off here is listed as off, even after a restart, so it can always be turned back on.
+        var off = s.TurnedOff.Select(d => d.InstanceId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var active = s.Inputs.Where(i => i.InstanceId is null || !off.Contains(i.InstanceId)).Select(i => new ListViewItem([
             InputMonitor.Label(i.Kind), i.ShortName, Format.Duration(s.Time - i.LastInput) + " ago",
             i.IdleResets.ToString("N0"), i.ResetsLastMinute.ToString("N0"), i.WhatItSends ?? ""])
         {
             Tag = i,
-            ToolTipText = (i.Suspicious ? "This device keeps resetting the idle timer. If nobody is using it, unplug it.\n" : "") + i.Name + (i.WhatItSends is { } what ? "\n" + what : ""),
+            ToolTipText = (i.Suspicious ? "This device keeps resetting the idle timer. If nobody is using it, right-click it to turn it off.\n" : "") +
+                          i.Name + (i.WhatItSends is { } what ? "\n" + what : ""),
             ForeColor = i.Suspicious ? Red : i.IdleResets == 0 ? Muted : ForeColor,
-        }), empty);
+        });
+        var turnedOff = s.TurnedOff.Select(d => new ListViewItem(["turned off", d.Name, "", "", "", "Turned off by WhyNotSleeping. Right-click to turn it back on."])
+        {
+            Tag = d,
+            ToolTipText = d.InstanceId,
+            ForeColor = Muted,
+        });
+        Fill(_inputs, active.Concat(turnedOff), empty);
+    }
+
+    bool CanTurnOff(object? selected) => _isAdmin &&
+        selected is InputSource { InstanceId: not null, Kind: not (InputKind.Mouse or InputKind.Keyboard or InputKind.Software) };
+
+    async void TurnOffSelected()
+    {
+        if (Selected(_inputs) is not InputSource device || !CanTurnOff(device)) return;
+        var answer = MessageBox.Show(this,
+            $"Windows will turn off \"{device.ShortName}\", like Disable in Device Manager.\n\n" +
+            "Games and apps won't see it, and it stays off, even after a restart or replugging it, " +
+            "until you turn it back on: right-click it here and choose \"Turn back on\", or enable it in Device Manager.\n\n" +
+            "Turn it off?",
+            "Turn off this device", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (answer != DialogResult.Yes) return;
+        var error = await Task.Run(() => DeviceSwitch.TurnOff(device.InstanceId!, device.ShortName));
+        AfterDeviceSwitch(error);
+    }
+
+    async void TurnOnSelected()
+    {
+        if (Selected(_inputs) is not TurnedOffDevice device || !_isAdmin) return;
+        AfterDeviceSwitch(await Task.Run(() => DeviceSwitch.TurnOn(device.InstanceId)));
+    }
+
+    void AfterDeviceSwitch(string? error)
+    {
+        if (error != null)
+            MessageBox.Show(this, error, "WhyNotSleeping", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        _wake.TrySetResult();
     }
 
     /// <summary>
@@ -463,6 +522,7 @@ internal sealed class MainForm : Form
         {
             PowerRequest r => r.Key,
             RequestOverride o => o.ToString(),
+            TurnedOffDevice d => "off:" + d.InstanceId,
             string s => s,
             InputSource i => i.Id.ToString(),
             ControlStatus c => c.Name,

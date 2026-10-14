@@ -15,7 +15,7 @@ internal enum InputKind { Mouse, Keyboard, Controller, Touchpad, Touch, Pen, Med
 /// in the last minute, which is how a jittery axis gives itself away.
 /// </summary>
 internal sealed record InputSource(long Id, InputKind Kind, string Name, DateTime LastInput, long Events,
-    DateTime? LastIdleReset, long IdleResets, int ResetsLastMinute, string? LastChange, ControlStatus? Busiest)
+    DateTime? LastIdleReset, long IdleResets, int ResetsLastMinute, string? LastChange, ControlStatus? Busiest, string? InstanceId)
 {
     /// <summary>Mouse and keyboard input is normally the user; anything else resetting the timer is worth pointing out.</summary>
     public bool Suspicious => Kind is not (InputKind.Mouse or InputKind.Keyboard) && ResetsLastMinute > 0;
@@ -84,6 +84,7 @@ internal static partial class InputMonitor
         public readonly IntPtr Handle = handle;
         public readonly InputKind Kind = kind;
         public readonly string Name = name;
+        public string? InstanceId; // for turning it off, e.g. HID\VID_044F&PID_0402\c&3738ddd0&0&0000
         public DateTime LastInput;
         public long Events;
         public DateTime? LastIdleReset;
@@ -154,7 +155,7 @@ internal static partial class InputMonitor
                 TrimResets(device, now);
             return Devices.Values.Where(d => d.Events > 0)
                 .Select(d => new InputSource((long)d.Handle, d.Kind, d.Name, d.LastInput, d.Events, d.LastIdleReset, d.IdleResets,
-                    d.RecentResets.Count, d.LastChange, Statuses(d, now).Where(c => c.Changes > 0).MaxBy(c => c.Changes)))
+                    d.RecentResets.Count, d.LastChange, Statuses(d, now).Where(c => c.Changes > 0).MaxBy(c => c.Changes), d.InstanceId))
                 .OrderByDescending(s => s.LastInput)
                 .ToList();
         }
@@ -328,7 +329,12 @@ internal static partial class InputMonitor
             Native.RimTypeKeyboard => InputKind.Keyboard,
             _ => ClassifyHid(handle),
         };
-        return new Device(handle, kind, DescribeDevice(handle)) { Decoder = type == Native.RimTypeHid ? HidDecoder.Create(handle) : null };
+        var path = DevicePath(handle);
+        return new Device(handle, kind, DescribeDevice(handle, path))
+        {
+            Decoder = type == Native.RimTypeHid ? HidDecoder.Create(handle) : null,
+            InstanceId = path is null ? null : DeviceSwitch.InstanceId(path),
+        };
     }
 
     /// <summary>Records what each control did and returns the latest change, e.g. "Rz axis 510 → 513".</summary>
@@ -384,15 +390,21 @@ internal static partial class InputMonitor
     }
 
     /// <summary>"Logitech USB Receiver (VID 046D PID C52B)", falling back to the IDs or the device path.</summary>
-    static string DescribeDevice(IntPtr handle)
+    /// <summary>The device interface path, e.g. \\?\HID#VID_044F&amp;PID_0402#c&amp;3738ddd0&amp;0&amp;0000#{4d1e55b2-...}.</summary>
+    static string? DevicePath(IntPtr handle)
     {
         uint chars = 0;
         Native.GetRawInputDeviceInfo(handle, Native.RidiDeviceName, null, ref chars);
-        if (chars == 0) return $"device 0x{handle:X}";
+        if (chars == 0) return null;
         var buffer = new byte[chars * 2];
         if (Native.GetRawInputDeviceInfo(handle, Native.RidiDeviceName, buffer, ref chars) == uint.MaxValue)
-            return $"device 0x{handle:X}";
-        var path = Encoding.Unicode.GetString(buffer).TrimEnd('\0');
+            return null;
+        return Encoding.Unicode.GetString(buffer).TrimEnd('\0');
+    }
+
+    static string DescribeDevice(IntPtr handle, string? path)
+    {
+        if (path is null) return $"device 0x{handle:X}";
 
         var product = HidString(path);
         var match = VidPid().Match(path);

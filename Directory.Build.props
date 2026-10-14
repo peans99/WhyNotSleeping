@@ -12,9 +12,9 @@
     <Copyright>Copyright © nekron</Copyright>
     <Description>Shows what is keeping Windows from going to sleep or turning the screen off.</Description>
 
-    <Version>1.0.0</Version>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
-    <FileVersion>1.0.0.0</FileVersion>
+    <Version>1.0.1</Version>
+    <AssemblyVersion>1.0.1.0</AssemblyVersion>
+    <FileVersion>1.0.1.0</FileVersion>
 
     <RepositoryUrl>https://github.com/peans99/WhyNotSleeping</RepositoryUrl>
     <PackageProjectUrl>https://github.com/peans99/WhyNotSleeping</PackageProjectUrl>
