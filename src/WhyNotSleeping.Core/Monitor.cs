@@ -53,10 +53,11 @@ internal static class Format
     public static string Timeout(uint seconds) => seconds == 0 ? "Never" : Duration(TimeSpan.FromSeconds(seconds));
 }
 
-internal sealed record Snapshot(DateTime Time, PowerState Power, List<PowerRequest>? Requests, List<RequestOverride> Overrides, List<InputSource> Inputs)
+internal sealed record Snapshot(DateTime Time, PowerState Power, List<PowerRequest>? Requests, List<RequestOverride> Overrides, List<InputSource> Inputs,
+    List<TurnedOffDevice> TurnedOff)
 {
     public static Snapshot Capture() =>
-        new(DateTime.Now, PowerState.Capture(), PowerCfg.GetRequests(), PowerCfg.GetOverrides(), InputMonitor.Sources());
+        new(DateTime.Now, PowerState.Capture(), PowerCfg.GetRequests(), PowerCfg.GetOverrides(), InputMonitor.Sources(), DeviceSwitch.TurnedOff());
 }
 
 /// <summary>Everything one refresh found, copied out of the monitor so a UI thread can read it safely.</summary>

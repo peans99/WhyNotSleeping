@@ -55,7 +55,9 @@ Some controllers reset Windows' idle timer every time they send a report, and a 
 That screenshot is a real Thrustmaster HOTAS Warthog that nobody was touching. Its X and Y axes don't move, but it also reports two **vendor channels**, a raw copy of the stick's position that games don't read, and those wander by a few counts thousands of times a minute. That alone reset the idle timer over 1,300 times a minute.
 
 - **A jittering axis** (X, Y, throttle, slider...): recalibrate it, or add a small deadzone in the vendor's software (VKB DevCfg, VPC Configurator, Thrustmaster TARGET, Logitech G HUB...).
-- **A jittering vendor channel:** no game setting, deadzone or calibration reaches it. Unplug the device when you're not using it (a USB hub with power switches makes that easy), or disable it in Device Manager and re-enable it before you play.
+- **A jittering vendor channel:** no game setting, deadzone or calibration reaches it. Turn the device off when you're not using it: right-click it in **Input devices** and choose **Turn off this device** (it stays off, even after a restart, until you right-click it and choose **Turn back on**). Or unplug it; a USB hub with power switches makes that easy.
+
+If Windows refuses to turn a device off because a program has it open, WhyNotSleeping names that program. It is often **Steam** (Steam Input keeps every controller open): exit Steam, turn the device off, then start Steam again.
 - **Keyboard or mouse modes:** many HOTAS and button boxes also show up as a keyboard or mouse, or their software (TARGET, Joystick Gremlin, Steam Input) turns axes and buttons into key presses. Look in **Input devices** for a keyboard or mouse with your stick's name: the *What it's sending* column says which key or movement it is.
 
 The verdict cards name the device and the control, so you can check a fix worked.
@@ -97,11 +99,17 @@ The solution has three projects. `WhyNotSleeping.Core` holds the monitoring: pow
 ### Releasing
 
 1. Bump `<Version>` in `Directory.Build.props` and add a `### <version>` section under [Release notes](#release-notes). CI fails a pull request that changes `src/` without both, unless a commit says why it doesn't need to with a `No-version-bump: <reason>` trailer.
-2. Merge, then tag the merge commit: `git tag -a v1.0.1 -m "..." && git push origin v1.0.1`.
+2. Open a pull request. The `main` branch ruleset (`.github/rulesets/main.json`) requires both CI checks to pass before it merges, and blocks force-pushes and deletion; repository admins can bypass it.
+3. Merge, then tag the merge commit: `git tag -a v1.0.1 -m "..." && git push origin v1.0.1`.
 
 The release workflow refuses a tag that disagrees with `Directory.Build.props`. It builds both executables, smoke-tests the console tool, scans the files with Microsoft Defender, and publishes them with that version's notes.
 
 ## Release notes
+
+### 1.0.1
+
+- Turn an input device off and back on from **Input devices** (right-click), like Disable in Device Manager: for a controller whose noisy sensor keeps the screen on, without unplugging it. It stays off until you turn it back on, and the app lists it as turned off even after a restart. Mice and keyboards can't be turned off this way, so you can't lock yourself out.
+- When a program has the device open and Windows won't turn it off, the message names the program (often Steam).
 
 ### 1.0.0
 
