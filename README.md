@@ -48,7 +48,7 @@ Two verdicts at the top, **Sleep** and **Screen**, each saying in plain words wh
 
 ### A controller, joystick or HOTAS keeps the screen on
 
-Some controllers reset Windows' idle timer every time they send a report, and a controller with a noisy sensor sends reports all the time, even when nobody touches it. To find out which part is doing it, open **Input devices**, click the controller and leave it alone for a minute. The list below shows every axis and button live. Whatever you move or press lights up, and a control that keeps changing on its own is marked as jittering.
+Some controllers reset Windows' idle timer every time they send a report, and a controller with a noisy sensor sends reports all the time, even when nobody touches it. To find out which part is doing it, open **Input devices**, click the controller and leave it alone for a minute. The list below shows every axis and button live. Whatever you move or press lights up, and a control that changes on its own is marked in red: **jittering** when it wanders over a sliver of its range, or **changing nonstop** when it keeps moving for a whole minute while the keyboard and mouse sit idle.
 
 ![The live controls of a HOTAS Warthog joystick: X and Y are still, two vendor channels jitter](docs/screenshot-controller.png)
 
@@ -105,6 +105,13 @@ The solution has three projects. `WhyNotSleeping.Core` holds the monitoring: pow
 The release workflow refuses a tag that disagrees with `Directory.Build.props`. It builds both executables, smoke-tests the console tool, scans the files with Microsoft Defender, and publishes them with that version's notes.
 
 ## Release notes
+
+### 1.0.2
+
+- Works on Windows in other languages: whether it runs as administrator is checked directly, instead of by looking for `powercfg`'s English refusal. On Windows in another language the refusal is translated, and could have been taken for "nothing is keeping it awake".
+- A control that keeps changing for a whole minute while the keyboard and mouse sit idle is flagged as changing on its own, even when it swings over a wide range. Before, only small jitter was caught. The verdicts name that control first.
+- The ignored apps list no longer asks for administrator rights; Windows shows it to anyone.
+- Turning a device off and back on is now tested on real hardware (a Thrustmaster rudder, once Steam had let go of it).
 
 ### 1.0.1
 

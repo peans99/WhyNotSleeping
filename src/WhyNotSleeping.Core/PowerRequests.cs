@@ -41,6 +41,10 @@ internal static class PowerCfg
     /// <summary>Returns null when not elevated (powercfg /requests requires admin).</summary>
     public static List<PowerRequest>? GetRequests()
     {
+        // Checked directly rather than by powercfg's refusal, which is translated: on French Windows it doesn't say
+        // "administrator privileges", and the refusal would be parsed as a list with nothing in it.
+        if (!Elevation.IsAdmin)
+            return null;
         var output = Run("/requests");
         if (output.Contains("administrator privileges", StringComparison.OrdinalIgnoreCase))
             return null;

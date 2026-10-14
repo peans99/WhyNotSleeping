@@ -81,12 +81,21 @@ internal static class Diagnosis
         s.Inputs.Where(i => i.Suspicious).OrderByDescending(i => i.ResetsLastMinute).Select(i => new Finding(Severity.Problem,
             $"{InputMonitor.Label(i.Kind)} '{i.ShortName}' reset the idle timer {i.ResetsLastMinute} time(s) in the last minute" +
             (i.Kind == InputKind.Software ? " - something is injecting input."
-                // Vendor channels are data games never read, so no deadzone or calibration reaches them.
-                : i.Busiest is { Jitter: true, Name: var name } vendor && name.StartsWith("vendor channel")
-                    ? $": its {name} (raw data games don't use) is jittering ({vendor.Min}–{vendor.Max}) - settings can't fix that; unplug it when you're not using it."
-                : i.Busiest is { Jitter: true } jitter ? $": its {jitter.Name} is jittering ({jitter.Min}–{jitter.Max}) - recalibrate it, add a deadzone, or unplug it."
-                : i.Busiest is { } busiest ? $", mostly its {busiest.Name} - if nobody is using it, unplug it."
-                : " - if nobody is using it, unplug it.")));
+                : i.Busiest is { OnItsOwn: true } own ? $": its {OnItsOwn(own)}"
+                : i.Busiest is { } busiest ? $", mostly its {busiest.Name} - if nobody is using it, turn it off or unplug it."
+                : " - if nobody is using it, turn it off or unplug it.")));
+
+    /// <summary>What a control moving by itself is doing, and what can be done about it.</summary>
+    static string OnItsOwn(ControlStatus c)
+    {
+        // Vendor channels are data games never read, so no deadzone or calibration reaches them.
+        var vendor = c.Name.StartsWith("vendor channel");
+        var what = c.Jitter ? $"is jittering ({c.Min}–{c.Max})" : $"keeps changing with the keyboard and mouse idle ({c.Min}–{c.Max})";
+        return $"{c.Name}{(vendor ? " (raw data games don't use)" : "")} {what} - " + (vendor
+            ? "settings can't fix that; turn it off or unplug it when you're not using it."
+            : c.Jitter ? "recalibrate it, add a deadzone, or turn it off when you're not using it."
+            : "if nobody is touching it, it's moving on its own: turn it off or unplug it when you're not using it.");
+    }
 
     public static string DescribeDisplayChange(DisplayChange change, PowerState power)
     {

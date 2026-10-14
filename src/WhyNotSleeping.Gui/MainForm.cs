@@ -359,6 +359,7 @@ internal sealed class MainForm : Form
             _seen[c.Name] = (c.Value, changed);
             var lit = now - changed < TimeSpan.FromSeconds(1);
             var note = c.Jitter ? "jittering: a noisy sensor sends input while nobody touches it"
+                : c.Unattended ? "changing nonstop with the keyboard and mouse idle"
                 : lit ? (c.IsAxis ? "moving" : "pressed")
                 : "";
             return (Key: c.Name, Cells: new[]
@@ -368,7 +369,7 @@ internal sealed class MainForm : Form
                 c.Changes == 0 ? "" : c.Changes.ToString("N0"),
                 c.IsAxis && c.Min != null ? $"{c.Min}–{c.Max}" : "",
                 note,
-            }, Color: c.Jitter ? Red : lit ? Blue : c.Changes == 0 ? Muted : TextColor, Status: c);
+            }, Color: c.OnItsOwn ? Red : lit ? Blue : c.Changes == 0 ? Muted : TextColor, Status: c);
         }).ToList();
 
         // Update in place when the rows are the same controls, so the list doesn't flicker or lose its scroll position.
@@ -417,7 +418,7 @@ internal sealed class MainForm : Form
     void ShowOverrides(Snapshot s)
     {
         Fill(_overrides, s.Overrides.Select(o => new ListViewItem([FriendlyKind(o.CallerType), o.Name, string.Join(", ", o.Requests.Select(FriendlyCategory))]) { Tag = o }),
-            _isAdmin ? "No apps are being ignored." : "Restart as administrator to see ignored apps.");
+            "No apps are being ignored.");
         _unignore.Enabled = _isAdmin && Selected(_overrides) is RequestOverride;
     }
 
