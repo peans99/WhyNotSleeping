@@ -27,8 +27,12 @@ internal sealed record InputSource(long Id, InputKind Kind, string Name, DateTim
     public string ShortName => Name.EndsWith(')') && Name.LastIndexOf(" (VID ", StringComparison.Ordinal) is var i and > 0 ? Name[..i] : Name;
 }
 
-/// <summary>One axis or button of a device: its value now, and how much it moved in the last minute.</summary>
-internal sealed record ControlStatus(string Name, bool IsAxis, long? Value, long LogicalMin, long LogicalMax, int Changes, long? Min, long? Max)
+/// <summary>
+/// One axis or button of a device: its value now, and how much it moved in the last minute. Unattended means it changed
+/// in nearly every second of that minute while the keyboard and mouse sat idle.
+/// </summary>
+internal sealed record ControlStatus(string Name, bool IsAxis, long? Value, long LogicalMin, long LogicalMax, int Changes, long? Min, long? Max,
+    bool Unattended = false)
 {
     static readonly string[] HatDirections = ["up", "up-right", "right", "down-right", "down", "down-left", "left", "up-left"];
 
@@ -45,9 +49,17 @@ internal sealed record ControlStatus(string Name, bool IsAxis, long? Value, long
             ? Value is { } v && v >= LogicalMin && v <= LogicalMax ? HatDirections[v - LogicalMin] : "centered"
         : Value?.ToString() ?? "";
 
+    /// <summary>
+    /// Changing on its own: a tiny jitter, or nonstop change over any range while nobody used the keyboard or mouse.
+    /// The second catches a noisy channel that swings widely, which the jitter rule misses (a pilot flying with only the
+    /// HOTAS for a minute looks the same, which is why the advice always says "if nobody is using it").
+    /// </summary>
+    public bool OnItsOwn => Jitter || Unattended;
+
     public string Describe() =>
         !IsAxis ? $"{Name}: {Changes} change{(Changes == 1 ? "" : "s")} in the last minute"
         : Jitter ? $"{Name} jittering between {Min} and {Max} ({Changes} changes in the last minute)"
+        : Unattended ? $"{Name} changing nonstop with the keyboard and mouse idle, between {Min} and {Max} ({Changes} changes in the last minute)"
         : $"{Name}: {Changes} change{(Changes == 1 ? "" : "s")} in the last minute, between {Min} and {Max} of {LogicalMin}–{LogicalMax}";
 }
 
@@ -102,17 +114,24 @@ internal static partial class InputMonitor
         public readonly bool IsAxis = isAxis;
         public readonly long LogicalMin = logicalMin, LogicalMax = logicalMax;
         public readonly Queue<(DateTime Time, long Value)> Recent = new();
+        /// <summary>The seconds of the last minute in which it changed, which the capped Recent can't tell for a fast device.</summary>
+        public readonly Queue<long> Seconds = new();
+        long _lastSecond;
 
         public void Add(DateTime now, long value)
         {
             Recent.Enqueue((now, value));
             if (Recent.Count > 5000) Recent.Dequeue();
+            var second = now.Ticks / TimeSpan.TicksPerSecond;
+            if (second != _lastSecond) Seconds.Enqueue(_lastSecond = second);
         }
 
         public void Trim(DateTime now)
         {
             while (Recent.TryPeek(out var r) && now - r.Time > TimeSpan.FromMinutes(1))
                 Recent.Dequeue();
+            while (Seconds.TryPeek(out var s) && now.Ticks / TimeSpan.TicksPerSecond - s >= 60)
+                Seconds.Dequeue();
         }
     }
 
@@ -121,6 +140,7 @@ internal static partial class InputMonitor
     static readonly Dictionary<IntPtr, Device> Devices = new();
     static readonly ConcurrentQueue<InputResumed> Pending = new();
     static DateTime _lastReset;
+    static DateTime _lastHumanInput; // last keyboard or mouse input
     static uint _lastResetTick;
 
     public static bool Available { get; private set; }
@@ -128,6 +148,7 @@ internal static partial class InputMonitor
     public static void Start()
     {
         _lastReset = DateTime.Now - PowerState.CaptureUserIdle();
+        _lastHumanInput = DateTime.Now; // unknown before start, so assume just now
         new Thread(Run) { IsBackground = true, Name = "raw input" }.Start();
     }
 
@@ -155,7 +176,7 @@ internal static partial class InputMonitor
                 TrimResets(device, now);
             return Devices.Values.Where(d => d.Events > 0)
                 .Select(d => new InputSource((long)d.Handle, d.Kind, d.Name, d.LastInput, d.Events, d.LastIdleReset, d.IdleResets,
-                    d.RecentResets.Count, d.LastChange, Statuses(d, now).Where(c => c.Changes > 0).MaxBy(c => c.Changes), d.InstanceId))
+                    d.RecentResets.Count, d.LastChange, Busiest(Statuses(d, now)), d.InstanceId))
                 .OrderByDescending(s => s.LastInput)
                 .ToList();
         }
@@ -170,6 +191,10 @@ internal static partial class InputMonitor
         lock (Sync)
             return Devices.TryGetValue((IntPtr)id, out var device) ? Statuses(device, DateTime.Now) : [];
     }
+
+    /// <summary>The control to name for a device: one moving on its own first, then the one that changed most.</summary>
+    static ControlStatus? Busiest(List<ControlStatus> controls) =>
+        controls.Where(c => c.Changes > 0).OrderByDescending(c => c.OnItsOwn).ThenByDescending(c => c.Changes).FirstOrDefault();
 
     static List<ControlStatus> Statuses(Device device, DateTime now)
     {
@@ -187,9 +212,12 @@ internal static partial class InputMonitor
     static ControlStatus Status(string name, bool isAxis, long? value, long min, long max, ControlHistory? history, DateTime now)
     {
         history?.Trim(now);
-        return history is { Recent.Count: > 0 }
-            ? new ControlStatus(name, isAxis, value, min, max, history.Recent.Count, history.Recent.Min(r => r.Value), history.Recent.Max(r => r.Value))
-            : new ControlStatus(name, isAxis, value, min, max, 0, null, null);
+        if (history is not { Recent.Count: > 0 })
+            return new ControlStatus(name, isAxis, value, min, max, 0, null, null);
+        // Changing in at least 50 of the last 60 seconds, with no keyboard or mouse for that whole minute.
+        var unattended = isAxis && history.Seconds.Count >= 50 && now - _lastHumanInput >= TimeSpan.FromMinutes(1);
+        return new ControlStatus(name, isAxis, value, min, max, history.Recent.Count,
+            history.Recent.Min(r => r.Value), history.Recent.Max(r => r.Value), unattended);
     }
 
     static void TrimResets(Device device, DateTime now)
@@ -300,6 +328,7 @@ internal static partial class InputMonitor
 
             device.Events++;
             device.LastInput = now;
+            if (device.Kind is InputKind.Mouse or InputKind.Keyboard) _lastHumanInput = now;
             if (change != null) device.LastChange = change;
 
             // Windows stamps the last-input time with the time of the input that reset it, so the first input whose

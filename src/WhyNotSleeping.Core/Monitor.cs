@@ -141,7 +141,8 @@ internal sealed class SleepMonitor(int intervalSeconds, string? logPath)
 
 internal static class Elevation
 {
-    public static bool IsAdmin => new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
+    /// <summary>Fixed for the life of the process: elevating means starting a new one.</summary>
+    public static bool IsAdmin { get; } = new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
 
     /// <summary>Starts an elevated copy of this app (UAC prompt). Returns false if the user declined.</summary>
     public static bool TryRelaunch(string arguments)
