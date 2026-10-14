@@ -8,6 +8,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="WhyNotSleeping" />
     <InternalsVisibleTo Include="WhyNotSleepingCli" />
+    <InternalsVisibleTo Include="WhyNotSleeping.Tests" />
   </ItemGroup>
 
 </Project>

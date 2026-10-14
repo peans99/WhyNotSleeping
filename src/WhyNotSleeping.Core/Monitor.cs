@@ -53,9 +53,18 @@ internal static class Format
     public static string Timeout(uint seconds) => seconds == 0 ? "Never" : Duration(TimeSpan.FromSeconds(seconds));
 }
 
+/// <summary>The away group as the verdicts see it: which devices it turns off, after how many minutes.</summary>
+internal sealed record AwayGroup(IReadOnlySet<string> InstanceIds, int Minutes)
+{
+    public bool Contains(string? instanceId) => instanceId != null && InstanceIds.Contains(instanceId);
+}
+
 internal sealed record Snapshot(DateTime Time, PowerState Power, List<PowerRequest>? Requests, List<RequestOverride> Overrides, List<InputSource> Inputs,
     List<TurnedOffDevice> TurnedOff)
 {
+    /// <summary>Set when an away group is on, so a noisy device in it reads as taken care of.</summary>
+    public AwayGroup? Away { get; init; }
+
     public static Snapshot Capture() =>
         new(DateTime.Now, PowerState.Capture(), PowerCfg.GetRequests(), PowerCfg.GetOverrides(), InputMonitor.Sources(), DeviceSwitch.TurnedOff());
 }
@@ -82,6 +91,8 @@ internal sealed class SleepMonitor(int intervalSeconds, string? logPath)
 
     public int IntervalSeconds => intervalSeconds;
     public string? LogPath => logPath;
+    /// <summary>The away group, set from the UI thread whenever it changes; null when it is off.</summary>
+    public AwayGroup? Away { get; set; }
 
     public void Start(bool isAdmin)
     {
@@ -90,9 +101,12 @@ internal sealed class SleepMonitor(int intervalSeconds, string? logPath)
         InputMonitor.Start();
     }
 
-    public void Stop()
+    public void Stop() => Log("monitor stopped");
+
+    /// <summary>Adds an event of the app's own, e.g. devices turned off while the user is away.</summary>
+    public void Log(string message)
     {
-        lock (_sync) _tracker.Event(DateTime.Now, "monitor stopped");
+        lock (_sync) _tracker.Event(DateTime.Now, message);
     }
 
     /// <summary>A single snapshot without the change tracking, after giving the display and input monitors a moment.</summary>
@@ -100,7 +114,7 @@ internal sealed class SleepMonitor(int intervalSeconds, string? logPath)
     {
         DisplayMonitor.WaitForInitialState(TimeSpan.FromSeconds(1));
         Thread.Sleep(TimeSpan.FromSeconds(3)); // sample input devices for a moment
-        var snapshot = Snapshot.Capture();
+        var snapshot = Snapshot.Capture() with { Away = Away };
         if (snapshot.Requests != null) _tracker.Update(snapshot.Requests, snapshot.Time);
         return BuildReport(snapshot);
     }
@@ -112,7 +126,7 @@ internal sealed class SleepMonitor(int intervalSeconds, string? logPath)
 
     Report TickLocked()
     {
-        var snapshot = Snapshot.Capture();
+        var snapshot = Snapshot.Capture() with { Away = Away };
 
         // A large gap between ticks means the machine was asleep/hibernated (or the process was frozen).
         if (_lastTick is { } prev && snapshot.Time - prev > TimeSpan.FromSeconds(intervalSeconds + 30))

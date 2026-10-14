@@ -50,6 +50,10 @@ jobs:
           "tag=$tag"         | Out-File $env:GITHUB_OUTPUT -Append
           "version=$version" | Out-File $env:GITHUB_OUTPUT -Append
 
+      # Never ship a build whose tests fail.
+      - name: Test
+        run: dotnet test WhyNotSleeping.slnx -c Release
+
       # The SDK stamps the commit into the product version (1.0.0+<sha>) by itself.
       - name: Publish
         shell: pwsh
@@ -61,41 +65,10 @@ jobs:
           & dist/WhyNotSleepingCli.exe --once --no-elevate --no-log
           if ($LASTEXITCODE -ne 0) { throw "console tool exited with $LASTEXITCODE" }
 
+      # Refuses to publish files Defender flags or removes (scan.ps1, the same scan CI runs).
       - name: Scan release files with Microsoft Defender
         shell: pwsh
-        run: |
-          $status = Get-MpComputerStatus -ErrorAction Stop
-          if (-not $status.AntivirusEnabled) {
-            throw 'Microsoft Defender Antivirus is unavailable; refusing to publish an unscanned release.'
-          }
-
-          # Hosted images can carry stale definitions. Best effort: a
-          # definitions outage should not block a release the scan is about to check.
-          try {
-            Update-MpSignature -ErrorAction Stop
-            Write-Host "Defender definitions: $((Get-MpComputerStatus).AntivirusSignatureVersion)"
-          } catch {
-            Write-Warning "Could not update Defender definitions, scanning with what the image has: $($_.Exception.Message)"
-          }
-
-          $scanPath = (Resolve-Path 'dist').Path
-          $scanStartedAt = Get-Date
-          Start-MpScan -ScanType CustomScan -ScanPath $scanPath -ErrorAction Stop
-
-          $threats = @(Get-MpThreatDetection -ErrorAction SilentlyContinue | Where-Object {
-            $_.InitialDetectionTime -ge $scanStartedAt -and
-            ($_.Resources | Where-Object { $_ -like "*$scanPath*" } | Measure-Object).Count -gt 0
-          })
-          if ($threats) {
-            $names = ($threats | ForEach-Object ThreatName | Select-Object -Unique) -join ', '
-            throw "Microsoft Defender detected a threat in the release files: $names"
-          }
-
-          # Defender quarantines what it detects, so a missing file is a detection too.
-          $missing = 'dist/WhyNotSleeping.exe', 'dist/WhyNotSleepingCli.exe' | Where-Object { -not (Test-Path $_) }
-          if ($missing) { throw "Microsoft Defender removed a release file: $($missing -join ', ')" }
-
-          Write-Host "Microsoft Defender scanned the release files in $scanPath."
+        run: ./scan.ps1
 
       - name: Release
         shell: pwsh

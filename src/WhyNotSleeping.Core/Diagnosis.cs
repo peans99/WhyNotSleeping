@@ -76,14 +76,22 @@ internal static class Diagnosis
         return findings;
     }
 
-    /// <summary>Devices other than mouse/keyboard that reset the idle timer recently, e.g. a controller with jittery axes.</summary>
+    /// <summary>
+    /// Devices other than mouse/keyboard that reset the idle timer recently, e.g. a controller with jittery axes. One in
+    /// the away group is only a warning: it is turned off once nobody is there.
+    /// </summary>
     static IEnumerable<Finding> Input(Snapshot s) =>
-        s.Inputs.Where(i => i.Suspicious).OrderByDescending(i => i.ResetsLastMinute).Select(i => new Finding(Severity.Problem,
-            $"{InputMonitor.Label(i.Kind)} '{i.ShortName}' reset the idle timer {i.ResetsLastMinute} time(s) in the last minute" +
-            (i.Kind == InputKind.Software ? " - something is injecting input."
-                : i.Busiest is { OnItsOwn: true } own ? $": its {OnItsOwn(own)}"
-                : i.Busiest is { } busiest ? $", mostly its {busiest.Name} - if nobody is using it, turn it off or unplug it."
-                : " - if nobody is using it, turn it off or unplug it.")));
+        s.Inputs.Where(i => i.Suspicious).OrderByDescending(i => i.ResetsLastMinute).Select(i => s.Away is { } away && away.Contains(i.InstanceId)
+            ? new Finding(Severity.Warning,
+                $"{InputMonitor.Label(i.Kind)} '{i.ShortName}' reset the idle timer {i.ResetsLastMinute} time(s) in the last minute" +
+                (i.Busiest is { OnItsOwn: true } own ? $" (its {own.Name} is moving on its own)" : "") +
+                $" - it's in the away group, so it is turned off after {away.Minutes} min without keyboard, mouse or controller.")
+            : new Finding(Severity.Problem,
+                $"{InputMonitor.Label(i.Kind)} '{i.ShortName}' reset the idle timer {i.ResetsLastMinute} time(s) in the last minute" +
+                (i.Kind == InputKind.Software ? " - something is injecting input."
+                    : i.Busiest is { OnItsOwn: true } own2 ? $": its {OnItsOwn(own2)}"
+                    : i.Busiest is { } busiest ? $", mostly its {busiest.Name} - if nobody is using it, turn it off or unplug it."
+                    : " - if nobody is using it, turn it off or unplug it.")));
 
     /// <summary>What a control moving by itself is doing, and what can be done about it.</summary>
     static string OnItsOwn(ControlStatus c)
