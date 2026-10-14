@@ -62,7 +62,7 @@ internal sealed class TrayApp : ApplicationContext
                     ? new AwayGroup(_settings.AwayDevices.Select(d => d.InstanceId).ToHashSet(StringComparer.OrdinalIgnoreCase), _settings.AwayMinutes)
                     : null;
                 await _away.TickAsync();
-                if (_form.Visible) _form.ShowAway();
+                if (!_exiting && _form.Visible) _form.ShowAway();
             }
             catch (Exception ex)
             {
@@ -86,6 +86,7 @@ internal sealed class TrayApp : ApplicationContext
     {
         _monitor.Start(_isAdmin);
         await _away.RestoreLeftoversAsync();
+        if (_exiting) return;
         _awayTimer.Start();
         while (!_exiting)
         {
@@ -98,7 +99,7 @@ internal sealed class TrayApp : ApplicationContext
             }
             catch (Exception ex)
             {
-                _form.ShowError(ex.Message);
+                if (!_exiting) _form.ShowError(ex.Message);
             }
             _wake = new TaskCompletionSource();
             await Task.WhenAny(Task.Delay(TimeSpan.FromSeconds(_monitor.IntervalSeconds)), _wake.Task);
@@ -177,13 +178,13 @@ internal sealed class TrayApp : ApplicationContext
 
     public bool Exiting => _exiting;
 
-    public void Exit()
+    public async void Exit()
     {
         if (_exiting) return;
         _exiting = true;
         _awayTimer.Stop();
         SystemEvents.SessionSwitch -= OnSessionSwitch;
-        _away.ComeBack("WhyNotSleeping exited");
+        await _away.StopAsync();
         _monitor.Stop();
         _tray.Visible = false;
         _tray.Dispose();
