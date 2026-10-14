@@ -81,7 +81,12 @@ internal static class Diagnosis
     /// the away group is only a warning: it is turned off once nobody is there.
     /// </summary>
     static IEnumerable<Finding> Input(Snapshot s) =>
-        s.Inputs.Where(i => i.Suspicious).OrderByDescending(i => i.ResetsLastMinute).Select(i => s.Away is { } away && away.Contains(i.InstanceId)
+        s.Inputs.Where(i => i.Suspicious).OrderByDescending(i => i.ResetsLastMinute).Select(i => s.Away is { } failedGroup &&
+            failedGroup.Contains(i.InstanceId) && failedGroup.Failures.TryGetValue(i.InstanceId!, out var failure)
+            ? new Finding(Severity.Problem, $"{InputMonitor.Label(i.Kind)} '{i.ShortName}' is an unresolved blocker: {failure}")
+            : s.Away is { PauseReason: { } pause } pausedGroup && pausedGroup.Contains(i.InstanceId)
+            ? new Finding(Severity.Problem, $"{InputMonitor.Label(i.Kind)} '{i.ShortName}' reset the idle timer {i.ResetsLastMinute} time(s) in the last minute - away group: {pause}")
+            : s.Away is { } away && away.Contains(i.InstanceId)
             ? new Finding(Severity.Warning,
                 $"{InputMonitor.Label(i.Kind)} '{i.ShortName}' reset the idle timer {i.ResetsLastMinute} time(s) in the last minute" +
                 (i.Busiest is { OnItsOwn: true } own ? $" (its {own.Name} is moving on its own)" : "") +

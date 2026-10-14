@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/badge/.NET-10-512BD4" alt=".NET 10">
   <img src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D6" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/licence-Apache--2.0-blue" alt="Licence Apache 2.0">
-  <img src="https://img.shields.io/badge/tests-90%20passing-4fd48a" alt="90 tests">
+  <img src="https://img.shields.io/badge/tests-115%20passing-4fd48a" alt="115 tests">
   <img src="https://img.shields.io/badge/scanned-Microsoft%20Defender-46617a" alt="Scanned with Microsoft Defender">
 </p>
 
@@ -36,7 +36,7 @@ Two verdicts at the top, **Sleep** and **Screen**, each saying in plain words wh
 - **Your power plan**: when the PC sleeps and the screen turns off ("Never" is the most common culprit), whether you're plugged in, how long you've been idle, and whether the screen is actually on, off or dimmed.
 - **Keeping it awake**: the apps, services and drivers asking Windows to stay awake (audio streams, video playback, downloads, Windows Update...) and how long each has been holding on. Right-click an app to ignore its requests or open its folder.
 - **Input devices**: every mouse, keyboard, game controller, touchpad, touch screen, pen, media-key remote and power button that sent input, by name (e.g. "Razer Basilisk V3"), which ones actually reset the idle timer, and what each one is sending ("key Num Enter", "mouse moved", "vendor channel 2 jittering between 33856 and 33879"). Click a controller to watch its axes and buttons live. Jittery controls and software-injected input (remote desktop, mouse jigglers) are flagged.
-- **Event log**: requests appearing and disappearing, power changes, the screen turning off and on (and how late that was compared to the timeout), input after a quiet spell, and gaps where the PC was actually asleep. It's also saved to `%LOCALAPPDATA%\WhyNotSleeping\whynotsleeping.log`, so you can leave it running overnight and check in the morning what woke the screen at 3am.
+- **Event log**: requests appearing and disappearing, power changes, the screen turning off and on (and how late that was compared to the timeout), input after a quiet spell, and gaps where the PC was actually asleep. Filter by event type or search for a device or app. **Export filtered log** applies those filters to the full saved history, including overnight events that have scrolled out of the window. It's also saved to `%LOCALAPPDATA%\WhyNotSleeping\whynotsleeping.log`, so you can leave it running overnight and check in the morning what woke the screen at 3am.
 - **When I'm away**: the away group, controllers to turn off by themselves while you're away (see [below](#turn-it-off-only-while-youre-away)).
 - **Ignored apps**: apps whose requests Windows has been told to disregard, with a button to stop ignoring them.
 
@@ -85,6 +85,8 @@ Turning a stick off by hand every evening gets old. Put it in the **away group**
 It comes back on as soon as you move the mouse, press a key, use a controller or unlock the PC. Pressing buttons or really moving the sticks of **any** controller counts as someone being there, so nothing is turned off under someone flying with the HOTAS alone or playing with a gamepad; noise from vendor channels or a tiny jitter doesn't count. (A controller whose axis keeps swinging widely on its own looks like someone using it, and keeps the group on: the **When I'm away** tab names it. Recalibrate it, or turn it off when you're not using it.) By default it also waits while a full-screen game, video or presentation is running. The event log says when it turned the devices off and back on.
 
 The away group turns devices off only until they're turned back on or Windows restarts, so nothing can stay off for good: if WhyNotSleeping is stopped while they're off, it turns them back on the next time it starts. It needs administrator rights, and **Steam** can stop it like it stops **Turn off this device** (see above); it then says so in a notification and in the event log.
+
+Right-click the tray icon to **Pause the away group** for 30 minutes, one hour, or until WhyNotSleeping restarts. Pausing turns its devices back on and cancels any pending screen-off or sleep action. **Resume the away group** starts a new away countdown. Pauses are temporary and don't change the saved settings. If a device still resets the idle timer while the group is paused, or Windows refuses to turn it off, the verdicts show it as an unresolved problem and explain why.
 
 ## Console version
 
@@ -135,6 +137,14 @@ CI builds with warnings as errors, runs the tests, publishes both executables ex
 The release workflow refuses a tag that disagrees with `Directory.Build.props`. It builds both executables, smoke-tests the console tool, scans the files with Microsoft Defender, and publishes them with that version's notes.
 
 ## Release notes
+
+### 1.2.0
+
+- Pause the away group from the tray for 30 minutes, one hour, or until the app restarts; resume it whenever you like. Pausing turns devices back on, including during a disable operation.
+- Failed away actions stay red in the verdicts and name the device and Windows' reason, such as Steam keeping it open. Paused groups no longer read as taking care of noisy devices.
+- Filter and search the event log, then export the matching events from the full saved history. Manual device actions are logged too.
+- Power and startup commands have a real 10-second timeout, with their output read concurrently. Ignoring or unignoring an app runs in the background so the window stays responsive.
+- Settings are written to a temporary file and replaced only after the complete contents are flushed to disk, preserving the previous file if writing fails.
 
 ### 1.1.1
 

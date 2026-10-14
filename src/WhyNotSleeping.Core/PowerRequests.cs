@@ -25,17 +25,11 @@ internal static class PowerCfg
 {
     public static string Run(string arguments)
     {
-        var psi = new ProcessStartInfo("powercfg.exe", arguments)
-        {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        using var process = Process.Start(psi)!;
-        var output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
-        process.WaitForExit(10_000);
-        return output;
+        var result = ProcessRunner.RunAsync(new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "powercfg.exe"), arguments),
+            TimeSpan.FromSeconds(10)).GetAwaiter().GetResult();
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException($"powercfg failed (exit code {result.ExitCode}). {(result.Output + result.Error).Trim()}");
+        return result.Output + result.Error;
     }
 
     /// <summary>Returns null when not elevated (powercfg /requests requires admin).</summary>

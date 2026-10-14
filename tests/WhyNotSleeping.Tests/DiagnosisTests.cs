@@ -66,6 +66,33 @@ public class DiagnosisTests
     }
 
     [Fact]
+    public void A_failed_away_action_remains_a_problem_and_names_the_failure()
+    {
+        var hotas = Hotas(1300);
+        var s = Snap(Power(), null, hotas) with
+        {
+            Away = new AwayGroup(new HashSet<string>([hotas.InstanceId!]), 10)
+            {
+                Failures = new Dictionary<string, string> { [hotas.InstanceId!] = "Steam has the device open." },
+            },
+        };
+        Assert.Contains(Diagnosis.Sleep(s, []), f => f.Severity == Severity.Problem && f.Text.Contains("Steam"));
+        Assert.Contains(Diagnosis.Screen(s, []), f => f.Severity == Severity.Problem && f.Text.Contains("Steam"));
+    }
+
+    [Fact]
+    public void A_paused_away_group_does_not_hide_a_noisy_controller()
+    {
+        var hotas = Hotas(1300);
+        var s = Snap(Power(), null, hotas) with
+        {
+            Away = new AwayGroup(new HashSet<string>([hotas.InstanceId!]), 10) { PauseReason = "Paused until 04:00." },
+        };
+        Assert.Contains(Diagnosis.Sleep(s, []), f => f.Severity == Severity.Problem && f.Text.Contains("Paused until 04:00"));
+        Assert.Contains(Diagnosis.Screen(s, []), f => f.Severity == Severity.Problem && f.Text.Contains("Paused until 04:00"));
+    }
+
+    [Fact]
     public void Another_device_than_the_away_group_stays_a_problem()
     {
         var s = Snap(Power(), null, Hotas(1300, @"HID\VID_1234&PID_5678\x")) with
