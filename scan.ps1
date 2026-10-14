@@ -23,9 +23,21 @@ try {
 $scanPath = (Resolve-Path 'dist').Path
 $scanStartedAt = Get-Date
 # -ErrorAction Stop on each Defender call: the Defender cmdlets live in a module that doesn't see this
-# script's $ErrorActionPreference, so without it a scan that never ran ("Provider load failure") would
-# go on to report a clean result.
-Start-MpScan -ScanType CustomScan -ScanPath $scanPath -ErrorAction Stop
+# script's $ErrorActionPreference, so without it a scan that never ran would go on to report a clean result.
+#
+# Retried: a definitions update that fails ("The remote procedure call failed") leaves Defender restarting
+# for a few seconds, and a scan started then fails with "Provider load failure". It happens on hosted
+# runners and locally alike. Only a scan that never runs at all fails the build.
+for ($attempt = 1; ; $attempt++) {
+  try {
+    Start-MpScan -ScanType CustomScan -ScanPath $scanPath -ErrorAction Stop
+    break
+  } catch {
+    if ($attempt -ge 6) { throw "Microsoft Defender couldn't scan $scanPath after $attempt tries: $($_.Exception.Message)" }
+    Write-Warning "Scan attempt $attempt failed ($($_.Exception.Message)); waiting for Defender to come back."
+    Start-Sleep -Seconds 15
+  }
+}
 
 # SilentlyContinue: with no detections at all, Get-MpThreatDetection reports an error rather than nothing.
 $threats = @(Get-MpThreatDetection -ErrorAction SilentlyContinue | Where-Object {
