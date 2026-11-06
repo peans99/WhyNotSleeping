@@ -69,6 +69,50 @@ internal sealed record ControlStatus(string Name, bool IsAxis, long? Value, long
         : $"{Name}: {Changes} change{(Changes == 1 ? "" : "s")} in the last minute, between {Min} and {Max} of {LogicalMin}–{LogicalMax}";
 }
 
+/// <summary>
+/// Where an axis rests, and a move away from there that hasn't counted yet. A hand moves an axis somewhere and leaves
+/// it there for a moment; a worn potentiometer spikes past the jitter band and snaps back within a report or two (a
+/// Warthog throttle's slider flicking between 6 and 62 dozens of times a second, nobody touching it). So a move only
+/// counts once it has stayed beyond the band for <see cref="Hold"/>, and coming back within the band cancels it.
+/// </summary>
+internal sealed class AxisMotion
+{
+    public static readonly TimeSpan Hold = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>Where the axis last came to after a real move; noise wanders around it.</summary>
+    public long? Rest { get; private set; }
+    DateTime? _movedAt;
+    ControlChange? _move; // from Rest to the latest value, while it waits to hold
+
+    /// <summary>Takes a change of this axis; returns how it was used once a move has held, else null.</summary>
+    public string? Add(ControlChange change, DateTime now)
+    {
+        Rest ??= change.Previous ?? change.Value;
+        if (Math.Abs(change.Value - Rest.Value) <= ControlStatus.JitterBand(change.LogicalMin, change.LogicalMax))
+        {
+            _movedAt = null; // back where it rests: a spike, not a move
+            _move = null;
+            return null;
+        }
+        _movedAt ??= now;
+        _move = change with { Previous = Rest };
+        return Settle(now);
+    }
+
+    /// <summary>
+    /// Counts the move once it has held, also when nothing has changed since (a device that stops moving stops
+    /// sending), and makes where it went the new rest.
+    /// </summary>
+    public string? Settle(DateTime now)
+    {
+        if (_movedAt is not { } since || now - since < Hold || _move is not { } move) return null;
+        Rest = move.Value;
+        _movedAt = null;
+        _move = null;
+        return move.ToString();
+    }
+}
+
 /// <summary>Input that reset the idle timer after a quiet period: what ended the idle time (e.g. a mouse nudged at 3am).</summary>
 internal sealed record InputResumed(DateTime Time, InputKind Kind, string Name, TimeSpan Quiet, string? What);
 
@@ -124,8 +168,7 @@ internal static partial class InputMonitor
         public readonly Queue<(DateTime Time, long Value)> Recent = new();
         /// <summary>The seconds of the last minute in which it changed, which the capped Recent can't tell for a fast device.</summary>
         public readonly Queue<long> Seconds = new();
-        /// <summary>Where the axis last came to after a real move; noise wanders around it.</summary>
-        public long? Rest;
+        public readonly AxisMotion Motion = new();
         long _lastSecond;
 
         public void Add(DateTime now, long value)
@@ -171,7 +214,14 @@ internal static partial class InputMonitor
     /// </summary>
     public static (DateTime Time, string Device, string What)? LastDeliberate
     {
-        get { lock (Sync) return _lastDeliberate; }
+        get
+        {
+            lock (Sync)
+            {
+                SettleMoves(DateTime.Now);
+                return _lastDeliberate;
+            }
+        }
     }
 
     /// <summary>
@@ -182,6 +232,7 @@ internal static partial class InputMonitor
     {
         lock (Sync)
         {
+            SettleMoves(DateTime.Now);
             // Turned off and on again, a device comes back with a new handle: look at every one it had.
             var all = Devices.Values.Where(d => d.Events > 0 && instanceId.Equals(d.InstanceId, StringComparison.OrdinalIgnoreCase)).ToList();
             var used = all.Where(d => d.LastDeliberate != null).MaxBy(d => d.LastDeliberate);
@@ -448,33 +499,44 @@ internal static partial class InputMonitor
                     device.Controls[change.Control] = history = new ControlHistory(change.IsAxis, change.LogicalMin, change.LogicalMax);
                 history.Add(now, change.Value);
                 last = change;
-                if (Deliberate(change, ref history.Rest))
-                {
-                    device.LastDeliberate = now;
-                    device.DeliberateChange = change.ToString();
-                    _lastDeliberate = (now, InputSource.Short(device.Name), device.DeliberateChange);
-                }
+                if (Deliberate(change, history.Motion, now) is { } what)
+                    Used(device, what, now);
             }
         }
         return last?.ToString();
     }
 
-    /// <summary>
-    /// Whether a change looks like someone using the control rather than a noisy sensor: a button pressed, a hat or
-    /// a few-position switch moved, or an axis moving further from where it rested than jitter wanders. Vendor
-    /// channels never count: games don't read them, so nobody plays with them. <paramref name="rest"/> is where the
-    /// axis last came to after a real move, updated here.
-    /// </summary>
-    internal static bool Deliberate(ControlChange change, ref long? rest)
+    static void Used(Device device, string what, DateTime now)
     {
-        if (change.Control.StartsWith("vendor channel", StringComparison.Ordinal)) return false;
-        if (!change.IsAxis) return change.Value != 0;
-        if (change.LogicalMax - change.LogicalMin < 64) return true;
-        rest ??= change.Previous ?? change.Value;
-        if (Math.Abs(change.Value - rest.Value) <= ControlStatus.JitterBand(change.LogicalMin, change.LogicalMax))
-            return false;
-        rest = change.Value;
-        return true;
+        device.LastDeliberate = now;
+        device.DeliberateChange = what;
+        _lastDeliberate = (now, InputSource.Short(device.Name), what);
+    }
+
+    /// <summary>
+    /// An axis move only counts once it has held: a device that stops changing sends no more reports, so a move that
+    /// ended is confirmed when someone asks. Called under the lock.
+    /// </summary>
+    static void SettleMoves(DateTime now)
+    {
+        foreach (var device in Devices.Values)
+            foreach (var history in device.Controls.Values)
+                if (history.Motion.Settle(now) is { } what)
+                    Used(device, what, now);
+    }
+
+    /// <summary>
+    /// Whether a change looks like someone using the control rather than a noisy sensor, and if so how ("slider 6 →
+    /// 500"): a button pressed, a hat or a few-position switch moved, or an axis moved further from where it rested than
+    /// jitter wanders, and kept there (see <see cref="AxisMotion"/>). Vendor channels never count: games don't read
+    /// them, so nobody plays with them.
+    /// </summary>
+    internal static string? Deliberate(ControlChange change, AxisMotion motion, DateTime now)
+    {
+        if (change.Control.StartsWith("vendor channel", StringComparison.Ordinal)) return null;
+        if (!change.IsAxis) return change.Value != 0 ? change.ToString() : null;
+        if (change.LogicalMax - change.LogicalMin < 64) return change.ToString();
+        return motion.Add(change, now);
     }
 
     /// <summary>

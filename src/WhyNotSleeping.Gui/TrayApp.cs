@@ -42,12 +42,22 @@ internal sealed class TrayApp : ApplicationContext
         var open = new ToolStripMenuItem("Open WhyNotSleeping", null, (_, _) => ShowWindow()) { Font = new Font(SystemFonts.MenuFont!, FontStyle.Bold) };
         _comeBackItem = new ToolStripMenuItem("Turn the away group back on", null, (_, _) => _ = _away.ComeBackAsync("turned back on from the tray"));
         _startupItem = new ToolStripMenuItem("Start with Windows", null, (_, _) => SetStartWithWindows(!StartsWithWindows));
+        var pause = new ToolStripMenuItem("Pause the away group");
+        pause.DropDownItems.AddRange([
+            new ToolStripMenuItem("For 30 minutes", null, async (_, _) => await PauseAwayAsync(TimeSpan.FromMinutes(30))),
+            new ToolStripMenuItem("For one hour", null, async (_, _) => await PauseAwayAsync(TimeSpan.FromHours(1))),
+            new ToolStripMenuItem("Until WhyNotSleeping restarts", null, async (_, _) => await PauseAwayAsync(null)),
+        ]);
+        var resume = new ToolStripMenuItem("Resume the away group", null, (_, _) => { _away.Resume(); UpdateAwayView(); });
+        var screenOff = new ToolStripMenuItem("Turn the screen off", null, (_, _) => TurnScreenOff("from the tray"));
         var menu = new ContextMenuStrip();
-        menu.Items.AddRange([open, _comeBackItem, new ToolStripSeparator(), _startupItem, new ToolStripSeparator(),
-            new ToolStripMenuItem("Exit", null, (_, _) => Exit())]);
+        menu.Items.AddRange([open, screenOff, new ToolStripSeparator(), _comeBackItem, pause, resume, new ToolStripSeparator(), _startupItem,
+            new ToolStripSeparator(), new ToolStripMenuItem("Exit", null, (_, _) => Exit())]);
         menu.Opening += (_, _) =>
         {
             _comeBackItem.Visible = _away.IsAway;
+            pause.Enabled = _settings.AwayEnabled && _settings.AwayDevices.Count > 0;
+            resume.Visible = _away.PauseReason != null;
             _startupItem.Checked = StartsWithWindows;
             _startupItem.Enabled = isAdmin;
             _startupItem.Text = "Start with Windows" + (isAdmin ? "" : " (needs administrator)");
@@ -61,12 +71,12 @@ internal sealed class TrayApp : ApplicationContext
         {
             try
             {
-                // The verdicts read a noisy device in the group as taken care of, while the group can act.
-                _monitor.Away = _settings is { AwayEnabled: true, AwayDevices.Count: > 0 } && _isAdmin
-                    ? new AwayGroup(_settings.AwayDevices.Select(d => d.InstanceId).ToHashSet(StringComparer.OrdinalIgnoreCase), _settings.AwayMinutes)
-                    : null;
                 await _away.TickAsync();
-                if (!_exiting && _form.Visible) _form.ShowAway();
+                if (!_exiting)
+                {
+                    _monitor.Away = _away.VerdictGroup;
+                    if (_form.Visible) _form.ShowAway();
+                }
             }
             catch (Exception ex)
             {
@@ -83,8 +93,24 @@ internal sealed class TrayApp : ApplicationContext
     public int IntervalSeconds => _monitor.IntervalSeconds;
     public bool StartsWithWindows { get; private set; }
 
+    async Task PauseAwayAsync(TimeSpan? duration)
+    {
+        try { await _away.PauseAsync(duration); }
+        catch (Exception ex) { _monitor.Log($"* away: couldn't pause: {ex.Message}"); }
+        if (!_exiting) UpdateAwayView();
+    }
+
+    void UpdateAwayView()
+    {
+        _monitor.Away = _away.VerdictGroup;
+        if (_form.Visible) _form.ShowAway();
+        RefreshNow();
+    }
+
     /// <summary>Refreshes now instead of at the next tick.</summary>
     public void RefreshNow() => _wake.TrySetResult();
+
+    public void Log(string message) => _monitor.Log(message);
 
     async Task RunAsync()
     {
@@ -94,6 +120,7 @@ internal sealed class TrayApp : ApplicationContext
         _awayTimer.Start();
         while (!_exiting)
         {
+            _wake = new TaskCompletionSource();
             try
             {
                 var report = await Task.Run(_monitor.Tick);
@@ -105,7 +132,6 @@ internal sealed class TrayApp : ApplicationContext
             {
                 if (!_exiting) _form.ShowError(ex.Message);
             }
-            _wake = new TaskCompletionSource();
             await Task.WhenAny(Task.Delay(TimeSpan.FromSeconds(_monitor.IntervalSeconds)), _wake.Task);
         }
     }
@@ -113,8 +139,8 @@ internal sealed class TrayApp : ApplicationContext
     /// <summary>The tray tooltip: both verdicts, or that the away group is off. Windows cuts it at 127 characters.</summary>
     string TrayText(Report r)
     {
-        var text = _away.IsAway
-            ? "WhyNotSleeping\nAway: the away group is turned off"
+        var text = _away.IsAway || _away.PauseReason != null || _away.VerdictGroup?.Failures.Count > 0
+            ? $"WhyNotSleeping\n{_away.Status}"
             : $"WhyNotSleeping\n{Gui.MainForm.SleepHeadline(r)}\n{Gui.MainForm.ScreenHeadline(r)}"; // not ApplicationContext.MainForm
         return text.Length <= 127 ? text : text[..127];
     }
@@ -124,19 +150,44 @@ internal sealed class TrayApp : ApplicationContext
         switch (action)
         {
             case AwayAction.ScreenOff:
-                // Like the monitor's own timeout; it stays off now that the noisy devices can't wake it.
-                Native.PostMessage(_form.Handle, Native.WmSysCommand, Native.ScMonitorPower, 2);
+                ScreenOff();
                 break;
             case AwayAction.Sleep:
-                // SetSuspendState returns only after the PC wakes up, so not on the UI thread.
-                Task.Run(() =>
-                {
-                    if (!Application.SetSuspendState(System.Windows.Forms.PowerState.Suspend, false, false))
-                        _monitor.Log("* away: Windows didn't go to sleep when asked");
-                });
+                Suspend(); // the away line already says it is putting the PC to sleep
                 break;
         }
     }
+
+    // Like the monitor's own timeout; it stays off as long as nothing sends input that resets the idle timer.
+    void ScreenOff() => Native.PostMessage(_form.Handle, Native.WmSysCommand, Native.ScMonitorPower, 2);
+
+    /// <summary>
+    /// Turns the screen off now, from the window or the tray. The away group's devices are turned off first, so a
+    /// noisy controller can't wake it straight back up; the mouse, a key or a controller brings everything back.
+    /// </summary>
+    public async void TurnScreenOff(string from)
+    {
+        _monitor.Log($"* screen: turning the screen off ({from})");
+        // Give the hand time to leave the mouse: the click, or the mouse moving after it, would wake the screen.
+        await Task.Delay(TimeSpan.FromSeconds(1));
+        if (_exiting) return;
+        try { await _away.TurnOffNowAsync(); }
+        catch (Exception ex) { _monitor.Log($"* away: {ex.Message}"); }
+        if (_exiting) return;
+        UpdateAwayView();
+        ScreenOff();
+    }
+
+    void Suspend() =>
+        // SetSuspendState returns only after the PC wakes up, so not on the UI thread.
+        Task.Run(() =>
+        {
+            Native.EnableShutdownPrivilege();
+            if (Native.SetSuspendState(false, false, false)) return;
+            var error = new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastPInvokeError()).Message;
+            _monitor.Log($"* sleep: Windows didn't go to sleep when asked: {error}");
+            if (!_exiting) _form.BeginInvoke(() => _tray.ShowBalloonTip(10000, "Couldn't sleep", $"Windows didn't go to sleep: {error}", ToolTipIcon.Warning));
+        });
 
     void OnSessionSwitch(object? sender, SessionSwitchEventArgs e)
     {

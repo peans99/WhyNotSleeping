@@ -17,9 +17,11 @@ internal static class Diagnosis
 
         if (s.Requests == null)
         {
-            findings.Add(new(Severity.Unknown, "Not running as administrator - can't list power requests (apps/drivers keeping the PC awake)."));
+            findings.Add(new(Severity.Unknown, s.PowerCfgError is { } error
+                ? $"Couldn't list power requests this time (apps/drivers keeping the PC awake): {error}"
+                : "Not running as administrator - can't list power requests (apps/drivers keeping the PC awake)."));
             if (p.ExecutionState is { } state && (state & 0x41) != 0)
-                findings.Add(new(Severity.Problem, $"Some process or driver is requesting the system stay awake ({PowerState.DescribeExecutionState(state)}) - run as admin to see who."));
+                findings.Add(new(Severity.Problem, $"Some process or driver is requesting the system stay awake ({PowerState.DescribeExecutionState(state)}){WhoHint(s)}."));
         }
         else
         {
@@ -44,7 +46,10 @@ internal static class Diagnosis
         return findings;
     }
 
-    public static List<Finding> Screen(Snapshot s, List<(PowerRequest Request, DateTime Since)> active)
+    /// <summary>How to find out who, when the power requests are unknown.</summary>
+    static string WhoHint(Snapshot s) => s.PowerCfgError != null ? " - the power requests show who once powercfg answers again" : " - run as admin to see who";
+
+    public static List<Finding> Screen(Snapshot s,List<(PowerRequest Request, DateTime Since)> active)
     {
         var p = s.Power;
         if (DisplayMonitor.State == DisplayState.Off)
@@ -57,7 +62,7 @@ internal static class Diagnosis
         if (s.Requests == null)
         {
             if (p.ExecutionState is { } state && (state & 0x2) != 0)
-                findings.Add(new(Severity.Problem, "Some process or driver is requesting the display stay on (DISPLAY_REQUIRED) - run as admin to see who."));
+                findings.Add(new(Severity.Problem, $"Some process or driver is requesting the display stay on (DISPLAY_REQUIRED){WhoHint(s)}."));
         }
         else if (active.Count(a => a.Request.KeepsDisplayOn) is var display and > 0)
             findings.Add(new(Severity.Problem, $"{display} power request(s) are keeping the screen on (DISPLAY, see the list of power requests)."));
@@ -81,7 +86,12 @@ internal static class Diagnosis
     /// the away group is only a warning: it is turned off once nobody is there.
     /// </summary>
     static IEnumerable<Finding> Input(Snapshot s) =>
-        s.Inputs.Where(i => i.Suspicious).OrderByDescending(i => i.ResetsLastMinute).Select(i => s.Away is { } away && away.Contains(i.InstanceId)
+        s.Inputs.Where(i => i.Suspicious).OrderByDescending(i => i.ResetsLastMinute).Select(i => s.Away is { } failedGroup &&
+            failedGroup.Contains(i.InstanceId) && failedGroup.Failures.TryGetValue(i.InstanceId!, out var failure)
+            ? new Finding(Severity.Problem, $"{InputMonitor.Label(i.Kind)} '{i.ShortName}' is an unresolved blocker: {failure}")
+            : s.Away is { PauseReason: { } pause } pausedGroup && pausedGroup.Contains(i.InstanceId)
+            ? new Finding(Severity.Problem, $"{InputMonitor.Label(i.Kind)} '{i.ShortName}' reset the idle timer {i.ResetsLastMinute} time(s) in the last minute - away group: {pause}")
+            : s.Away is { } away && away.Contains(i.InstanceId)
             ? new Finding(Severity.Warning,
                 $"{InputMonitor.Label(i.Kind)} '{i.ShortName}' reset the idle timer {i.ResetsLastMinute} time(s) in the last minute" +
                 (i.Busiest is { OnItsOwn: true } own ? $" (its {own.Name} is moving on its own)" : "") +

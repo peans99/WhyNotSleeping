@@ -57,6 +57,8 @@ internal static class Format
 internal sealed record AwayGroup(IReadOnlySet<string> InstanceIds, int Minutes)
 {
     public bool Contains(string? instanceId) => instanceId != null && InstanceIds.Contains(instanceId);
+    public IReadOnlyDictionary<string, string> Failures { get; init; } = new Dictionary<string, string>();
+    public string? PauseReason { get; init; }
 }
 
 internal sealed record Snapshot(DateTime Time, PowerState Power, List<PowerRequest>? Requests, List<RequestOverride> Overrides, List<InputSource> Inputs,
@@ -65,8 +67,30 @@ internal sealed record Snapshot(DateTime Time, PowerState Power, List<PowerReque
     /// <summary>Set when an away group is on, so a noisy device in it reads as taken care of.</summary>
     public AwayGroup? Away { get; init; }
 
-    public static Snapshot Capture() =>
-        new(DateTime.Now, PowerState.Capture(), PowerCfg.GetRequests(), PowerCfg.GetOverrides(), InputMonitor.Sources(), DeviceSwitch.TurnedOff());
+    /// <summary>Why powercfg couldn't answer this time (it failed or took too long); the requests are then unknown.</summary>
+    public string? PowerCfgError { get; init; }
+
+    public static Snapshot Capture()
+    {
+        // A powercfg that fails or hangs shouldn't hide the power plan and input devices, or end the console version.
+        string? error = null;
+        var requests = Try(PowerCfg.GetRequests, null, ref error);
+        var overrides = Try(PowerCfg.GetOverrides, [], ref error);
+        return new(DateTime.Now, PowerState.Capture(), requests, overrides, InputMonitor.Sources(), DeviceSwitch.TurnedOff())
+        {
+            PowerCfgError = error,
+        };
+    }
+
+    internal static T Try<T>(Func<T> read, T unknown, ref string? error)
+    {
+        try { return read(); }
+        catch (Exception ex) when (ex is TimeoutException or InvalidOperationException or Win32Exception)
+        {
+            error ??= ex.Message;
+            return unknown;
+        }
+    }
 }
 
 /// <summary>Everything one refresh found, copied out of the monitor so a UI thread can read it safely.</summary>
@@ -121,13 +145,13 @@ internal sealed class SleepMonitor(int intervalSeconds, string? logPath)
 
     public Report Tick()
     {
-        lock (_sync) return TickLocked();
+        // Commands can take seconds. Keep the tracker lock available to UI actions while sampling Windows.
+        var snapshot = Snapshot.Capture() with { Away = Away };
+        lock (_sync) return TickLocked(snapshot);
     }
 
-    Report TickLocked()
+    Report TickLocked(Snapshot snapshot)
     {
-        var snapshot = Snapshot.Capture() with { Away = Away };
-
         // A large gap between ticks means the machine was asleep/hibernated (or the process was frozen).
         if (_lastTick is { } prev && snapshot.Time - prev > TimeSpan.FromSeconds(intervalSeconds + 30))
             _tracker.Event(snapshot.Time, $"* resumed: no samples for {Format.Duration(snapshot.Time - prev)} (system was probably asleep)");

@@ -53,12 +53,14 @@ internal sealed class Settings
         return settings;
     }
 
-    public void Save()
+    public void Save() => Save(FilePath);
+
+    internal void Save(string path)
     {
         try
         {
-            Directory.CreateDirectory(Folder);
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(this, SettingsJson.Default.Settings));
+            var json = JsonSerializer.Serialize(this, SettingsJson.Default.Settings);
+            AtomicFile.Write(path, writer => writer.Write(json));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* settings are best-effort */ }
     }
