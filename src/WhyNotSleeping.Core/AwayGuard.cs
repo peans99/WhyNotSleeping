@@ -152,6 +152,26 @@ internal sealed class AwayGuard(Settings settings, bool isAdmin, Action<string> 
     }
 
     /// <summary>
+    /// "Turn the screen off" from the window or the tray: turns the group's devices off now, without waiting for
+    /// the away time, so their noise can't wake the screen straight back up. They come back on like after any away.
+    /// Turning the screen off is the app's, whether or not there was anything to turn off.
+    /// </summary>
+    public async Task TurnOffNowAsync()
+    {
+        if (_stopping || IsAway || PauseReason != null || !settings.AwayEnabled || !isAdmin || settings.AwayDevices.Count == 0) return;
+        await _gate.WaitAsync();
+        try
+        {
+            if (!_stopping && !IsAway && PauseReason == null)
+                await GoAwayAsync(_services.Now(), null);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
     /// Everything the decision reads, gathered so it can be made (and tested) without the live input monitor.
     /// Failure is why the last try failed, while it waits for the user to have been back.
     /// </summary>
@@ -185,7 +205,8 @@ internal sealed class AwayGuard(Settings settings, bool isAdmin, Action<string> 
         return null;
     }
 
-    async Task GoAwayAsync(DateTime now, TimeSpan idle)
+    /// <summary>Idle is how long nobody was there, or null when asked to from the window or the tray.</summary>
+    async Task GoAwayAsync(DateTime now, TimeSpan? idle)
     {
         // One the user turned off themselves stays off: turning it back on is theirs to do.
         var manual = _services.Manual().Select(d => d.InstanceId).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -224,9 +245,14 @@ internal sealed class AwayGuard(Settings settings, bool isAdmin, Action<string> 
         // Recheck before asking Windows to turn off the screen or sleep, then restore under the same gate.
         if (_stopping || _returnReason != null || PauseReason != null || _services.Human() > now || _services.Controller()?.Time > now ||
             !settings.AwayEnabled || off.Any(d => !settings.InAwayGroup(d.InstanceId)) ||
-            (settings.AwaySkipFullScreen && _services.FullScreen()))
+            (idle != null && settings.AwaySkipFullScreen && _services.FullScreen()))
         {
             await RestoreAsync(_returnReason ?? "someone returned or the away group was changed");
+            return;
+        }
+        if (idle is not { } away)
+        {
+            log($"* away: turned off {string.Join(", ", off.Select(d => d.Name))} (the screen was turned off by hand)");
             return;
         }
         var then = settings.AwayAction switch
@@ -235,7 +261,7 @@ internal sealed class AwayGuard(Settings settings, bool isAdmin, Action<string> 
             AwayAction.Sleep => ", putting the PC to sleep",
             _ => "",
         };
-        log($"* away: turned off {string.Join(", ", off.Select(d => d.Name))} (nobody at the keyboard, mouse or a controller for {Format.Duration(idle)}){then}");
+        log($"* away: turned off {string.Join(", ", off.Select(d => d.Name))} (nobody at the keyboard, mouse or a controller for {Format.Duration(away)}){then}");
         WentAway?.Invoke(settings.AwayAction);
     }
 

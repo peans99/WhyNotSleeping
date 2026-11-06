@@ -67,6 +67,37 @@ public class AwayLifecycleTests
         }
     }
 
+    [Fact]
+    public async Task Turning_the_screen_off_by_hand_turns_the_group_off_at_once_and_input_brings_it_back()
+    {
+        var f = new Fixture { FullScreen = true }; // asked for, so a full-screen app doesn't stop it
+        f.Human = f.Now.AddSeconds(-2); // the click
+        await f.Guard.TurnOffNowAsync();
+        Assert.True(f.Guard.IsAway);
+        Assert.Equal(1, f.TurnedOff);
+        Assert.Equal(0, f.Actions); // the app turns the screen off itself
+
+        f.Now = f.Now.AddMinutes(1);
+        await f.Guard.TickAsync(); // still nobody there
+        Assert.Equal(1, f.TurnedOff);
+
+        f.Human = f.Now;
+        f.Now = f.Now.AddSeconds(1);
+        await f.Guard.TickAsync();
+        Assert.False(f.Guard.IsAway);
+        Assert.Equal(0, f.TurnedOff);
+    }
+
+    [Fact]
+    public async Task Turning_the_screen_off_by_hand_leaves_a_paused_group_alone()
+    {
+        var f = new Fixture();
+        await f.Guard.PauseAsync(TimeSpan.FromMinutes(30));
+        await f.Guard.TurnOffNowAsync();
+        Assert.False(f.Guard.IsAway);
+        Assert.Equal(0, f.TurnedOff);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

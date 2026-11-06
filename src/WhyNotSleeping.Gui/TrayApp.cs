@@ -49,9 +49,10 @@ internal sealed class TrayApp : ApplicationContext
             new ToolStripMenuItem("Until WhyNotSleeping restarts", null, async (_, _) => await PauseAwayAsync(null)),
         ]);
         var resume = new ToolStripMenuItem("Resume the away group", null, (_, _) => { _away.Resume(); UpdateAwayView(); });
+        var screenOff = new ToolStripMenuItem("Turn the screen off", null, (_, _) => TurnScreenOff("from the tray"));
         var menu = new ContextMenuStrip();
-        menu.Items.AddRange([open, _comeBackItem, pause, resume, new ToolStripSeparator(), _startupItem, new ToolStripSeparator(),
-            new ToolStripMenuItem("Exit", null, (_, _) => Exit())]);
+        menu.Items.AddRange([open, screenOff, new ToolStripSeparator(), _comeBackItem, pause, resume, new ToolStripSeparator(), _startupItem,
+            new ToolStripSeparator(), new ToolStripMenuItem("Exit", null, (_, _) => Exit())]);
         menu.Opening += (_, _) =>
         {
             _comeBackItem.Visible = _away.IsAway;
@@ -149,19 +150,44 @@ internal sealed class TrayApp : ApplicationContext
         switch (action)
         {
             case AwayAction.ScreenOff:
-                // Like the monitor's own timeout; it stays off now that the noisy devices can't wake it.
-                Native.PostMessage(_form.Handle, Native.WmSysCommand, Native.ScMonitorPower, 2);
+                ScreenOff();
                 break;
             case AwayAction.Sleep:
-                // SetSuspendState returns only after the PC wakes up, so not on the UI thread.
-                Task.Run(() =>
-                {
-                    if (!Application.SetSuspendState(System.Windows.Forms.PowerState.Suspend, false, false))
-                        _monitor.Log("* away: Windows didn't go to sleep when asked");
-                });
+                Suspend(); // the away line already says it is putting the PC to sleep
                 break;
         }
     }
+
+    // Like the monitor's own timeout; it stays off as long as nothing sends input that resets the idle timer.
+    void ScreenOff() => Native.PostMessage(_form.Handle, Native.WmSysCommand, Native.ScMonitorPower, 2);
+
+    /// <summary>
+    /// Turns the screen off now, from the window or the tray. The away group's devices are turned off first, so a
+    /// noisy controller can't wake it straight back up; the mouse, a key or a controller brings everything back.
+    /// </summary>
+    public async void TurnScreenOff(string from)
+    {
+        _monitor.Log($"* screen: turning the screen off ({from})");
+        // Give the hand time to leave the mouse: the click, or the mouse moving after it, would wake the screen.
+        await Task.Delay(TimeSpan.FromSeconds(1));
+        if (_exiting) return;
+        try { await _away.TurnOffNowAsync(); }
+        catch (Exception ex) { _monitor.Log($"* away: {ex.Message}"); }
+        if (_exiting) return;
+        UpdateAwayView();
+        ScreenOff();
+    }
+
+    void Suspend() =>
+        // SetSuspendState returns only after the PC wakes up, so not on the UI thread.
+        Task.Run(() =>
+        {
+            Native.EnableShutdownPrivilege();
+            if (Native.SetSuspendState(false, false, false)) return;
+            var error = new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastPInvokeError()).Message;
+            _monitor.Log($"* sleep: Windows didn't go to sleep when asked: {error}");
+            if (!_exiting) _form.BeginInvoke(() => _tray.ShowBalloonTip(10000, "Couldn't sleep", $"Windows didn't go to sleep: {error}", ToolTipIcon.Warning));
+        });
 
     void OnSessionSwitch(object? sender, SessionSwitchEventArgs e)
     {

@@ -69,57 +69,107 @@ public class InputTests
     static ControlChange Move(string control, long from, long to, long logicalMax = 1023) =>
         new(control, to, true, 0, logicalMax) { Previous = from };
 
+    static readonly DateTime T0 = new(2026, 11, 5, 18, 53, 40);
+
+    static DateTime Ms(int milliseconds) => T0.AddMilliseconds(milliseconds);
+
     [Fact]
     public void A_vendor_channel_never_counts_as_use()
     {
-        long? rest = null;
-        Assert.False(InputMonitor.Deliberate(Move("vendor channel 2", 0, 60000, 65535), ref rest));
+        var motion = new AxisMotion();
+        Assert.Null(InputMonitor.Deliberate(Move("vendor channel 2", 0, 60000, 65535), motion, Ms(0)));
+        Assert.Null(InputMonitor.Deliberate(Move("vendor channel 2", 60000, 60000, 65535), motion, Ms(1000)));
     }
 
     [Fact]
     public void Pressing_a_button_counts_and_releasing_it_does_not()
     {
-        long? rest = null;
-        Assert.True(InputMonitor.Deliberate(new ControlChange("button 3", 1, false, 0, 1), ref rest));
-        Assert.False(InputMonitor.Deliberate(new ControlChange("button 3", 0, false, 0, 1), ref rest));
+        var motion = new AxisMotion();
+        Assert.Equal("button 3 pressed", InputMonitor.Deliberate(new ControlChange("button 3", 1, false, 0, 1), motion, Ms(0)));
+        Assert.Null(InputMonitor.Deliberate(new ControlChange("button 3", 0, false, 0, 1), motion, Ms(100)));
     }
 
     [Fact]
     public void Jitter_around_where_an_axis_rests_does_not_count()
     {
         // The Warthog throttle's slider: 512-543 on 0-1023, band 40.
-        long? rest = null;
+        var motion = new AxisMotion();
+        var t = 0;
         foreach (var (from, to) in new[] { (527L, 531L), (531L, 512L), (512L, 543L), (543L, 520L) })
-            Assert.False(InputMonitor.Deliberate(Move("slider", from, to), ref rest));
-        Assert.Equal(527, rest);
+            Assert.Null(InputMonitor.Deliberate(Move("slider", from, to), motion, Ms(t += 400)));
+        Assert.Equal(527, motion.Rest);
     }
 
     [Fact]
-    public void Moving_an_axis_further_than_jitter_counts_and_becomes_the_new_rest()
+    public void Moving_an_axis_further_than_jitter_counts_once_it_holds_and_becomes_the_new_rest()
     {
-        long? rest = null;
-        Assert.False(InputMonitor.Deliberate(Move("X axis", 500, 510), ref rest));
-        Assert.True(InputMonitor.Deliberate(Move("X axis", 510, 800), ref rest));
-        Assert.Equal(800, rest);
+        var motion = new AxisMotion();
+        Assert.Null(InputMonitor.Deliberate(Move("X axis", 500, 510), motion, Ms(0)));
+        Assert.Null(InputMonitor.Deliberate(Move("X axis", 510, 800), motion, Ms(16))); // not yet: it might snap back
+        Assert.Null(motion.Settle(Ms(200)));
+        Assert.Equal("X axis 500 → 800", motion.Settle(Ms(300)));
+        Assert.Equal(800, motion.Rest);
         // Jitter around the new position doesn't count again.
-        Assert.False(InputMonitor.Deliberate(Move("X axis", 800, 790), ref rest));
+        Assert.Null(InputMonitor.Deliberate(Move("X axis", 800, 790), motion, Ms(1000)));
+        Assert.Null(motion.Settle(Ms(2000)));
+    }
+
+    [Fact]
+    public void A_move_that_keeps_going_counts_without_waiting_for_a_read()
+    {
+        var motion = new AxisMotion();
+        Assert.Null(InputMonitor.Deliberate(Move("Z axis", 0, 100), motion, Ms(0)));
+        Assert.Null(InputMonitor.Deliberate(Move("Z axis", 100, 200), motion, Ms(100)));
+        Assert.Equal("Z axis 0 → 300", InputMonitor.Deliberate(Move("Z axis", 200, 300), motion, Ms(260)));
+    }
+
+    [Fact]
+    public void A_slow_push_counts_even_though_every_step_is_small()
+    {
+        // A throttle pushed from 0 over half a second, 10 counts a report: no single step is past the band.
+        var motion = new AxisMotion();
+        string? used = null;
+        for (var (v, t) = (0L, 0); v < 500; v += 10, t += 5)
+            used ??= InputMonitor.Deliberate(Move("Z axis", v, v + 10), motion, Ms(t));
+        used ??= motion.Settle(Ms(1000)); // it stopped moving, so it sends nothing more
+        Assert.NotNull(used);
+    }
+
+    [Fact]
+    public void A_worn_slider_spiking_and_snapping_back_never_counts()
+    {
+        // Recorded from a Warthog throttle nobody was touching: 0-1023, band 40, a report every ~16 ms, flicking
+        // from where it rests to 50-85 and back. Before, this read as someone using the throttle 137 times in 75 s.
+        long[] values = [6, 62, 18, 7, 50, 6, 27, 51, 6, 50, 7, 62, 8, 41, 6, 50, 6, 29, 7, 61, 18, 7, 62, 6, 85, 17, 30, 74, 30, 6, 73, 6];
+        var motion = new AxisMotion();
+        var t = 0;
+        for (var round = 0; round < 50; round++)
+            for (var i = 1; i < values.Length; i++)
+            {
+                t += 16;
+                Assert.Null(InputMonitor.Deliberate(Move("slider", values[i - 1], values[i]), motion, Ms(t)));
+                Assert.Null(motion.Settle(Ms(t + 8)));
+            }
+        Assert.Null(motion.Settle(Ms(t + 1000)));
+        Assert.Equal(6, motion.Rest);
     }
 
     [Fact]
     public void Slow_drift_counts_once_it_has_gone_far_enough()
     {
-        long? rest = null;
+        var motion = new AxisMotion();
         var hits = 0;
+        var t = 0;
         for (long v = 500; v < 600; v += 5)
-            if (InputMonitor.Deliberate(Move("Z axis", v, v + 5), ref rest)) hits++;
-        Assert.Equal(2, hits); // 100 counts of drift with a 40-count band
+            if (InputMonitor.Deliberate(Move("Z axis", v, v + 5), motion, Ms(t += 100)) != null) hits++;
+        Assert.Equal(1, hits); // 100 counts of drift with a 40-count band, settling at 550-something
     }
 
     [Fact]
     public void A_hat_or_few_position_switch_always_counts()
     {
-        long? rest = null;
-        Assert.True(InputMonitor.Deliberate(Move("hat switch", 8, 2, 7), ref rest));
+        var motion = new AxisMotion();
+        Assert.NotNull(InputMonitor.Deliberate(Move("hat switch", 8, 2, 7), motion, Ms(0)));
     }
 
     [Theory]

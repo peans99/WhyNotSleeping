@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/badge/.NET-10-512BD4" alt=".NET 10">
   <img src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D6" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/licence-Apache--2.0-blue" alt="Licence Apache 2.0">
-  <img src="https://img.shields.io/badge/tests-119%20passing-4fd48a" alt="119 tests">
+  <img src="https://img.shields.io/badge/tests-124%20passing-4fd48a" alt="124 tests">
   <img src="https://img.shields.io/badge/scanned-Microsoft%20Defender-46617a" alt="Scanned with Microsoft Defender">
 </p>
 
@@ -25,7 +25,7 @@ Grab **WhyNotSleeping.exe** from the [latest release](https://github.com/peans99
 - It asks for **administrator rights** (the UAC prompt). Only an administrator can see *which* apps and drivers are keeping Windows awake. If you say no, it still runs and shows your power settings, the screen state and your input devices.
 - Windows may say the publisher is unknown because the executable is not code signed. Choose **More info**, then **Run anyway**.
 - It follows your Windows light/dark setting.
-- Closing the window doesn't stop it: it keeps watching from the notification area (the tray). Click its icon to bring the window back, right-click it and choose **Exit** to quit. Tick **Start with Windows** to have it start there each time you sign in, without the administrator prompt (it's a scheduled task named *WhyNotSleeping*).
+- Closing the window doesn't stop it: it keeps watching from the notification area (the tray). Click its icon to bring the window back, right-click it and choose **Exit** to quit. **Turn screen off** (in the window and the tray menu) turns the screen off now, and the [away group](#turn-it-off-only-while-youre-away)'s devices with it so their noise can't wake it. Tick **Start with Windows** to have it start there each time you sign in, without the administrator prompt (it's a scheduled task named *WhyNotSleeping*).
 
 **WhyNotSleepingCli.exe** is the same monitor in a console window, for anyone who'd rather have that (see [Console version](#console-version)).
 
@@ -82,7 +82,7 @@ Turning a stick off by hand every evening gets old. Put it in the **away group**
 - turns the screen off right away (the default), or
 - puts the PC to sleep right away.
 
-It comes back on as soon as you move the mouse, press a key, use a controller or unlock the PC. Pressing buttons or really moving the sticks of **any** controller counts as someone being there, so nothing is turned off under someone flying with the HOTAS alone or playing with a gamepad; noise from vendor channels or a tiny jitter doesn't count. (A controller whose axis keeps swinging widely on its own looks like someone using it, and keeps the group on: the **When I'm away** tab names it. Recalibrate it, or turn it off when you're not using it.) By default it also waits while a full-screen game, video or presentation is running. The event log says when it turned the devices off and back on.
+It comes back on as soon as you move the mouse, press a key, use a controller or unlock the PC. Pressing buttons or really moving the sticks of **any** controller counts as someone being there, so nothing is turned off under someone flying with the HOTAS alone or playing with a gamepad; noise from vendor channels, a tiny jitter, or an axis that spikes and snaps straight back doesn't count. (A controller whose axis keeps swinging widely on its own looks like someone using it, and keeps the group on: the **When I'm away** tab names it. Recalibrate it, or turn it off when you're not using it.) By default it also waits while a full-screen game, video or presentation is running. The event log says when it turned the devices off and back on.
 
 The away group turns devices off only until they're turned back on or Windows restarts, so nothing can stay off for good: if WhyNotSleeping is stopped while they're off, it turns them back on the next time it starts. It needs administrator rights, and **Steam** can stop it like it stops **Turn off this device** (see above); it then says so in a notification and in the event log.
 
@@ -140,6 +140,9 @@ The release workflow refuses a tag that disagrees with `Directory.Build.props`. 
 
 ### 1.2.0
 
+- **Turn screen off**, in the window and the tray menu, turns the screen off a second later. The away group's devices are turned off with it, so a noisy controller can't wake the screen straight back up; the mouse, a key or a controller brings everything back, as after any away.
+- The away group's *put the PC to sleep* action turns on the shutdown privilege Windows needs for it, and says why if Windows refuses.
+- A worn axis that spikes and snaps back no longer counts as someone using the controller. A Warthog throttle's slider flicking between 6 and 62 dozens of times a second, nobody touching it, kept the away group waiting forever, so the screen never turned off. A move now counts once the axis stays there for a quarter of a second.
 - Pause the away group from the tray for 30 minutes, one hour, or until the app restarts; resume it whenever you like. Pausing turns devices back on, including during a disable operation. When a pause ends, the group waits its full time again instead of acting at once.
 - A device that can't be turned back on (Steam holding it, say) is retried on your next input at most every 30 seconds, instead of every second with a log line each time.
 - Failed away actions stay red in the verdicts and name the device and Windows' reason, such as Steam keeping it open. Paused groups no longer read as taking care of noisy devices.

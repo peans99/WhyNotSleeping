@@ -261,4 +261,46 @@ internal static class Native
 
     [DllImport("user32.dll")]
     public static extern bool AllowSetForegroundWindow(int processId);
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4)] // TOKEN_PRIVILEGES with one LUID_AND_ATTRIBUTES; a LUID is two DWORDs
+    struct TokenPrivileges
+    {
+        public uint PrivilegeCount;
+        public long Luid;
+        public uint Attributes;
+    }
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool LookupPrivilegeValue(string? system, string name, out long luid);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref TokenPrivileges state, uint length, IntPtr previous, IntPtr returnLength);
+
+    /// <summary>Sleeps (or hibernates) the PC; returns once it has woken up again.</summary>
+    [DllImport("powrprof.dll", SetLastError = true)]
+    public static extern bool SetSuspendState(bool hibernate, bool force, bool wakeupEventsDisabled);
+
+    /// <summary>
+    /// Turns on SeShutdownPrivilege, which putting the PC to sleep needs. Every account has it, standard users
+    /// included, but it starts disabled, even when running as administrator.
+    /// </summary>
+    public static bool EnableShutdownPrivilege()
+    {
+        const uint adjustPrivileges = 0x20, query = 0x8, enabled = 0x2;
+        if (!OpenProcessToken(GetCurrentProcess(), adjustPrivileges | query, out var token)) return false;
+        try
+        {
+            if (!LookupPrivilegeValue(null, "SeShutdownPrivilege", out var luid)) return false;
+            var privileges = new TokenPrivileges { PrivilegeCount = 1, Luid = luid, Attributes = enabled };
+            // Succeeds without enabling anything when the privilege isn't held: ERROR_NOT_ALL_ASSIGNED says so.
+            return AdjustTokenPrivileges(token, false, ref privileges, 0, IntPtr.Zero, IntPtr.Zero) && Marshal.GetLastWin32Error() == 0;
+        }
+        finally
+        {
+            CloseHandle(token);
+        }
+    }
 }

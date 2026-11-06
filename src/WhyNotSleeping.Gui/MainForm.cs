@@ -104,6 +104,10 @@ internal sealed class MainForm : Form
         powerSettings.Click += (_, _) => Open("ms-settings:powersleep");
         var refresh = new Button { Text = "Refresh now", AutoSize = true, FlatStyle = FlatStyle.System };
         refresh.Click += (_, _) => _app.RefreshNow();
+        var screenOff = new Button { Text = "Turn screen off", AutoSize = true, FlatStyle = FlatStyle.System };
+        screenOff.Click += (_, _) => _app.TurnScreenOff("Turn screen off was clicked");
+        new ToolTip().SetToolTip(screenOff, "Turns the screen off in a second. The away group's devices are turned off too, so their noise " +
+            "can't wake it; move the mouse or press a key to bring everything back.");
         _startWithWindows = new CheckBox
         {
             Text = "Start with Windows", AutoSize = true, Enabled = isAdmin, ForeColor = TextColor, Margin = new Padding(3, 7, 12, 3),
@@ -116,7 +120,7 @@ internal sealed class MainForm : Form
             ? "Starts WhyNotSleeping in the notification area when you sign in, without the administrator prompt."
             : "Needs administrator: restart WhyNotSleeping as administrator to change this.");
         var headerButtons = new FlowLayoutPanel { AutoSize = true, Anchor = AnchorStyles.Right, WrapContents = false, Margin = Padding.Empty };
-        headerButtons.Controls.AddRange([_startWithWindows, powerSettings, refresh]);
+        headerButtons.Controls.AddRange([_startWithWindows, powerSettings, refresh, screenOff]);
         var header = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, Margin = new Padding(0, 0, 0, 8) };
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
