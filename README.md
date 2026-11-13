@@ -138,6 +138,10 @@ The release workflow refuses a tag that disagrees with `Directory.Build.props`. 
 
 ## Release notes
 
+### 1.2.1
+
+- Built with .NET 10.0.15, the November 2026 security update; 1.2.0 was built with 10.0.14. Each executable carries its own copy of .NET instead of using one installed on the PC, so a new build is how it gets those fixes. Nothing else changes.
+
 ### 1.2.0
 
 - **Turn screen off**, in the window and the tray menu, turns the screen off a second later. The away group's devices are turned off with it, so a noisy controller can't wake the screen straight back up; the mouse, a key or a controller brings everything back, as after any away.
