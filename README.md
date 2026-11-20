@@ -138,6 +138,10 @@ The release workflow refuses a tag that disagrees with `Directory.Build.props`. 
 
 ## Release notes
 
+### 1.2.2
+
+- Fixes a crash when the away group, or **Turn screen off**, couldn't turn a controller off because another app (often Steam) had it open. Looking for which app was holding it could hit a file handle with no name, and that closed WhyNotSleeping before it could turn the screen off.
+
 ### 1.2.1
 
 - Built with .NET 10.0.15, the November 2026 security update; 1.2.0 was built with 10.0.14. Each executable carries its own copy of .NET instead of using one installed on the PC, so a new build is how it gets those fixes. Nothing else changes.

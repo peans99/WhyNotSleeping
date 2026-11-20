@@ -147,10 +147,11 @@ internal static class DeviceHolders
                     try
                     {
                         foreach (var (h, result) in work.GetConsumingEnumerable())
-                            result.TrySetResult(Native.NtQueryObject(h, Native.ObjectNameInformation, buffer, 4096, out _) == 0
-                                // OBJECT_NAME_INFORMATION is a UNICODE_STRING: Length (bytes), MaximumLength, then the pointer.
-                                ? Marshal.PtrToStringUni(Marshal.ReadIntPtr(buffer, IntPtr.Size), Marshal.ReadInt16(buffer) / 2)
-                                : null);
+                        {
+                            // This thread is ours, so nothing above can catch for it: an exception here ends the app.
+                            try { result.TrySetResult(Name(h, buffer)); }
+                            catch (Exception) { result.TrySetResult(null); }
+                        }
                     }
                     finally
                     {
@@ -167,6 +168,16 @@ internal static class DeviceHolders
             _work.CompleteAdding();
             _work = null;
             return null;
+        }
+
+        static string? Name(IntPtr handle, IntPtr buffer)
+        {
+            if (Native.NtQueryObject(handle, Native.ObjectNameInformation, buffer, 4096, out _) != 0) return null;
+            // OBJECT_NAME_INFORMATION is a UNICODE_STRING: Length (bytes), MaximumLength, then the pointer.
+            // An unnamed object answers with a zero length and a null pointer.
+            var length = (ushort)Marshal.ReadInt16(buffer) / 2;
+            var text = Marshal.ReadIntPtr(buffer, IntPtr.Size);
+            return length == 0 || text == IntPtr.Zero ? null : Marshal.PtrToStringUni(text, length);
         }
 
         public void Dispose() => _work?.CompleteAdding();
